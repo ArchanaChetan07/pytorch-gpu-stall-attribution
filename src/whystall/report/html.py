@@ -288,14 +288,29 @@ def _floors_table(floors: list[DetectionFloor]) -> str:
     )
 
 
+def is_synthetic(att: Attribution | None) -> bool:
+    """True when the trace came from whystall.synth rather than a real run."""
+    if att is None:
+        return False
+    meta = att.view.meta.get("whystall")
+    return bool(isinstance(meta, dict) and meta.get("synthetic"))
+
+
 def render(
     att: Attribution | None = None,
     *,
     sweep: Sweep | None = None,
     floors: list[DetectionFloor] | None = None,
     title: str = "whystall report",
+    provenance: str | None = None,
 ) -> str:
-    """Render a complete standalone HTML document."""
+    """Render a complete standalone HTML document.
+
+    The provenance banner is not optional politeness. A report travels without
+    the terminal that produced it, and a synthetic-trace number that reaches
+    someone as an HTML file with no warning attached is exactly the kind of
+    unfalsifiable claim this project exists to argue against.
+    """
     parts: list[str] = []
     parts.append("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">")
     parts.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
@@ -319,6 +334,19 @@ def render(
         parts.append(f"<span>RUNS <b>{len(sweep.runs)}</b></span>")
         parts.append(f"<span>SCORING <b>{_e(sweep.granularity)}</b></span>")
     parts.append("</div></header>")
+
+    banner = provenance
+    if banner is None and is_synthetic(att):
+        banner = (
+            "These are synthetic traces from whystall.synth, not hardware. The numbers "
+            "below show the pipeline runs end to end; they are a property of the trace "
+            "model, not a measurement of anything real, and must never be quoted as one."
+        )
+    if banner:
+        parts.append(
+            '<section style="padding-top:26px"><div class="note warn">'
+            f"<h3>Provenance</h3><p>{_e(banner)}</p></div></section>"
+        )
 
     if att is not None:
         parts.append("<section><h2>Where the idle time went</h2>")
@@ -409,11 +437,15 @@ def write_report(
     sweep: Sweep | None = None,
     floors: list[DetectionFloor] | None = None,
     title: str = "whystall report",
+    provenance: str | None = None,
     also_json: bool = True,
 ) -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(render(att, sweep=sweep, floors=floors, title=title), encoding="utf-8")
+    p.write_text(
+        render(att, sweep=sweep, floors=floors, title=title, provenance=provenance),
+        encoding="utf-8",
+    )
     if also_json:
         payload: dict[str, Any] = {}
         if att is not None:

@@ -136,6 +136,21 @@ class TestHTMLReport:
         html = render(None, sweep=sweep, floors=[])
         assert "No control runs" in html
 
+    def test_synthetic_traces_carry_a_provenance_banner(self):
+        """A report travels without the terminal that produced it."""
+        html = render(_attributed("dataloader"))
+        assert "synthetic traces" in html
+        assert "never be quoted" in html
+
+    def test_explicit_provenance_overrides_detection(self):
+        html = render(_attributed("clean"), provenance="collected on an H100, cold cache")
+        assert "collected on an H100" in html
+
+    def test_demo_report_says_it_is_synthetic(self, tmp_path):
+        main(["demo", "--out", str(tmp_path), "--steps", "6"])
+        html = (tmp_path / "demo-report.html").read_text(encoding="utf-8")
+        assert "must never be quoted as a hardware result" in html
+
     def test_escapes_content(self):
         view, labels = load_trace_dict(build_scenario("clean", steps=3))
         html = render(attribute(view, labels=labels), title="<script>x</script>")
