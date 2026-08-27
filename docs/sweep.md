@@ -1,0 +1,130 @@
+# The experiment plan
+
+Write this before renting anything. A sweep improvised on a running meter is a
+sweep you pay for twice.
+
+## Machine acceptance test, before anything else
+
+Run these on every fresh rental. Each has cost someone a whole run.
+
+```bash
+# 1. Is the "SSD" a real local device or network block storage?
+fio --name=r --rw=randread --bs=4k --iodepth=32 --numjobs=4 --size=2G \
+    --runtime=30 --time_based --group_reporting --filename=/scratch/fio.test
+```
+
+Local NVMe: hundreds of thousands of IOPS, p99 latency in the hundreds of
+microseconds. Network-backed: an order of magnitude worse with a completely
+different tail. Every I/O result is contaminated if you get this wrong, and the
+contamination is invisible in the numbers.
+
+```bash
+# 2. Can you inject at all?
+dmsetup targets | grep delay || echo "no dm-delay: fallback injector only"
+test -w /proc/sys/vm/drop_caches || echo "cannot drop caches: size past 2x RAM"
+test -d /sys/fs/cgroup/cgroup.controllers && echo "cgroup v2 present"
+
+# 3. Is the GPU the one you are paying for, and is it power-limited?
+nvidia-smi --query-gpu=name,power.limit,power.max_limit,pcie.link.gen.current,pcie.link.width.current --format=csv
+```
+
+A card at a reduced power limit, or wired at PCIe gen3 x8 when you assumed gen4
+x16, changes the H2D results specifically. Record all of it — `HarnessConfig`
+writes host details into every manifest automatically.
+
+## The sweep
+
+| axis | values | why |
+|---|---|---|
+| class | 6 injectors | one per validatable class the box can produce |
+| magnitude | 500, 1500, 4000, 10000, 25000 µs | five points, spanning undetectable to dominant |
+| controls | 3 runs, no injection | the only thing that makes precision interpretable |
+| repeats | 1 initially | add repeats only where the curve is ragged |
+
+33 runs. At 40 profiled steps each, that is well under an hour of GPU time.
+
+**Two GPUs from here on.** Collective wait cannot be injected or validated on a
+single device, and it is the class that carries the tool beyond the storage
+vendors. One node, two GPUs, no RDMA needed.
+
+## What each phase has to clear
+
+The gates are the point. A gate you pass by lowering the bar was not a gate.
+
+### Gate 1 — does blame resolution work at all
+
+Two easiest injectors only: `host_sync` and `dataloader_cpu`.
+
+**Pass:** recall ≥ 0.90 on both, and unattributed < 25% on the control run.
+
+**Fail:** if unattributed exceeds half on an ordinary training loop, resolution
+from Kineto is not strong enough and the project reshapes onto Nsight Systems,
+which sees the blocking syscalls Kineto does not. Reshaping here costs a week.
+Discovering it after the full sweep costs the project.
+
+```bash
+whystall validate runs/ --granularity coarse --out gate1.html
+```
+
+### Gate 2 — does the split that matters work
+
+**Pass:** `dataloader_io` and `dataloader_cpu` separate at recall ≥ 0.85 above
+the detection floor, scored `--granularity strict`.
+
+**Fail:** the field number cannot be computed and the commercial argument goes
+with it. That is survivable and it changes the product: publish a validated
+six-class tool and state plainly that the split the vendors care about is not
+achievable from host telemetry alone. Do not paper over it. A negative result
+stated crisply still gets read; a soft claim that fails under replication does
+not get a second look.
+
+### Gate 3 — does it work on code you did not write
+
+Three unmodified codebases, no edits to the target script — profiler attach plus
+sidecar, nothing else:
+
+- the torchvision ImageNet reference script (what the storage vendors benchmark);
+- nanoGPT or torchtitan (compute-bound — the negative case, where the correct
+  answer is *nothing is starving*);
+- a HuggingFace `Trainer` run (different dataloader idioms).
+
+**Pass:** all three run clean, and the unattributed share is reported per
+codebase.
+
+A tool that requires instrumenting the training loop is a tool nobody runs.
+
+## Sampling rate
+
+The sidecar defaults to 200 Hz. Refinement needs `min_samples` (3) observations
+inside the blame window, so at 200 Hz nothing shorter than ~15 ms is refinable —
+correct behaviour, easily mistaken for the sampler being broken.
+
+If the stalls you care about are single-digit milliseconds, run at 500–1000 Hz
+rather than lowering `min_samples`. The reports say which windows were skipped
+and what rate would have resolved them.
+
+## What to publish
+
+Three method numbers and one field number. The method numbers make it
+defensible; the field number is what travels.
+
+1. **The confusion matrix**, including the unattributed row and the pairs it
+   confuses.
+2. **Detection floors** per class, with the bracketing sweep points shown so the
+   width of the bracket is visible rather than implied.
+3. **Unattributed share** on the three unmodified workloads.
+4. **The field number** — on a standard ResNet-50 ImageNet pipeline with a cold
+   cache, X% of GPU idle is block-device I/O and Y% is CPU decode, so at most X%
+   of the utilisation gap is a storage problem.
+
+Report the field number with its confidence interval and cache state attached,
+every single time it is quoted. It is the sentence that gets pasted into a Slack
+channel, and it will be quoted without its caveats unless the caveats are in the
+sentence.
+
+## Release the labelled traces
+
+Every injected run plus its ground-truth annotations. It lets anyone else's
+classifier be scored against yours on identical inputs, which is the fastest
+route from "a repo" to "the benchmark everyone reports on". One afternoon of
+packaging and a licence decision.

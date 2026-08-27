@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "whystall"
+version = "0.1.0"
+description = "Validated attribution of GPU idle windows to their causes, with an injected-ground-truth harness."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Archana Suresh Patil" }]
+keywords = ["gpu", "profiling", "pytorch", "dataloader", "attribution", "kineto"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Benchmark",
+  "Topic :: Software Development :: Debuggers",
+]
+# The core -- trace parsing, classification, validation, reporting -- is pure
+# standard library on purpose. It is the half that is meant to be upstreamable,
+# and a dependency-free core is a precondition for that.
+dependencies = []
+
+[project.optional-dependencies]
+# Only the injectors need torch, and they only ever run on the GPU box.
+inject = ["torch>=2.1"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.6"]
+
+[project.scripts]
+whystall = "whystall.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ArchanaChetan07/whystall"
+Issues = "https://github.com/ArchanaChetan07/whystall/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whystall"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+  "gpu: requires a CUDA device (skipped in CI)",
+  "linux: requires /proc (skipped off Linux)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
