@@ -68,6 +68,7 @@ class DeviceResult:
             "utilisation": round(self.gapset.utilisation, 6),
             "idle_total_us": self.gapset.idle_total_us,
             "idle_subthreshold_us": self.gapset.idle_subthreshold_us,
+            "idle_trailing_us": self.gapset.idle_trailing_us,
             "min_gap_us": self.gapset.min_gap_us,
             "gaps": len(self.gapset.gaps),
             "classified_us": self.classified_us,

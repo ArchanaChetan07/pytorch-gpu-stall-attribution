@@ -125,12 +125,6 @@ class Label:
         return hi - lo if hi > lo else 0
 
 
-#: How many consecutive already-closed events to tolerate before concluding that
-#: nothing further back can still be open. Generous relative to real Python call
-#: stacks; the cost of being wrong is a missed enclosing annotation.
-_CLOSED_RUN_LIMIT = 4096
-
-
 @dataclass(slots=True)
 class TraceView:
     """A loaded trace, indexed for the queries the classifier makes.
@@ -163,6 +157,13 @@ class TraceView:
     #: Cached ts keys per tid so lookups bisect without rebuilding.
     ts_by_tid: dict[int, list[int]] = field(default_factory=dict, repr=False)
     runtime_ts_by_tid: dict[int, list[int]] = field(default_factory=dict, repr=False)
+    #: Running maximum of end times, per thread. max_end[i] is the latest end
+    #: among events 0..i, so a backward scan can stop the moment it drops below
+    #: the window: nothing earlier can still be open. Replaces a fixed-length
+    #: heuristic that was both slow on long traces and able to miss a genuinely
+    #: long enclosing frame.
+    max_end_by_tid: dict[int, list[int]] = field(default_factory=dict, repr=False)
+    runtime_max_end_by_tid: dict[int, list[int]] = field(default_factory=dict, repr=False)
 
     def devices(self) -> list[int]:
         return sorted({ev.device for ev in self.gpu if ev.device is not None})
@@ -173,70 +174,54 @@ class TraceView:
         for ev in self.cpu:
             by_tid.setdefault(ev.tid, []).append(ev)
         self.ts_by_tid = {}
+        self.max_end_by_tid = {}
         for tid, evs in by_tid.items():
             # Sort so an enclosing event precedes what it contains: ascending
             # start, then descending duration.
             evs.sort(key=lambda e: (e.ts, -e.dur))
             _assign_depths(evs)
             self.ts_by_tid[tid] = [e.ts for e in evs]
+            self.max_end_by_tid[tid] = _running_max_end(evs)
         self.cpu_by_tid = by_tid
 
         rt_by_tid: dict[int, list[Event]] = {}
         for ev in self.runtime:
             rt_by_tid.setdefault(ev.tid, []).append(ev)
         self.runtime_ts_by_tid = {}
+        self.runtime_max_end_by_tid = {}
         for tid, evs in rt_by_tid.items():
             evs.sort(key=lambda e: (e.ts, -e.dur))
             self.runtime_ts_by_tid[tid] = [e.ts for e in evs]
+            self.runtime_max_end_by_tid[tid] = _running_max_end(evs)
         self.runtime_by_tid = rt_by_tid
 
     def runtime_on_thread(self, tid: int, start: int, end: int) -> list[Event]:
         """CUDA runtime calls on tid overlapping [start, end), in time order."""
-        evs = self.runtime_by_tid.get(tid)
-        if not evs:
-            return []
-        keys = self.runtime_ts_by_tid[tid]
-        hi = bisect_right(keys, end)
-        out: list[Event] = []
-        closed_run = 0
-        for i in range(hi - 1, -1, -1):
-            ev = evs[i]
-            if ev.end > start:
-                out.append(ev)
-                closed_run = 0
-            else:
-                closed_run += 1
-                if closed_run > _CLOSED_RUN_LIMIT:
-                    break
-        out.reverse()
-        return out
+        return _scan_back(
+            self.runtime_by_tid.get(tid),
+            self.runtime_ts_by_tid.get(tid),
+            self.runtime_max_end_by_tid.get(tid),
+            start,
+            end,
+        )
 
     def events_on_thread(self, tid: int, start: int, end: int) -> list[Event]:
         """Host events on tid overlapping [start, end), outermost first.
 
         Events on a thread form a proper stack, but an enclosing frame can start
         arbitrarily far back, so bisecting on start time alone would miss it.
-        The scan walks backwards from the insertion point and stops only once a
-        long run of already-closed events proves nothing else can still be open.
+        The scan walks backwards and stops at the first index whose running
+        maximum end time has fallen to or below the window start: at that point
+        no earlier event can still be open, which is exact rather than a
+        heuristic and costs one comparison per step.
         """
-        evs = self.cpu_by_tid.get(tid)
-        if not evs:
-            return []
-        keys = self.ts_by_tid[tid]
-        hi = bisect_right(keys, end)
-        out: list[Event] = []
-        closed_run = 0
-        for i in range(hi - 1, -1, -1):
-            ev = evs[i]
-            if ev.end > start:
-                out.append(ev)
-                closed_run = 0
-            else:
-                closed_run += 1
-                if closed_run > _CLOSED_RUN_LIMIT:
-                    break
-        out.reverse()
-        return out
+        return _scan_back(
+            self.cpu_by_tid.get(tid),
+            self.ts_by_tid.get(tid),
+            self.max_end_by_tid.get(tid),
+            start,
+            end,
+        )
 
     def bounds(self) -> tuple[int, int]:
         """The window the analysis is confined to.
@@ -253,6 +238,45 @@ class TraceView:
         if self.gpu:
             return self.gpu[0].ts, gpu_end
         return 0, 0
+
+
+def _running_max_end(evs: list[Event]) -> list[int]:
+    """Prefix maximum of end times, so a backward scan knows when to stop."""
+    out: list[int] = []
+    best = 0
+    for ev in evs:
+        end = ev.end
+        if end > best:
+            best = end
+        out.append(best)
+    return out
+
+
+def _scan_back(
+    evs: list[Event] | None,
+    keys: list[int] | None,
+    max_end: list[int] | None,
+    start: int,
+    end: int,
+) -> list[Event]:
+    """Events overlapping [start, end), outermost first.
+
+    Exact: the prefix-maximum test stops the scan only when no earlier event can
+    still be open, so a long enclosing frame is always found however many short
+    events sit between it and the window.
+    """
+    if not evs or keys is None or max_end is None:
+        return []
+    hi = bisect_right(keys, end)
+    out: list[Event] = []
+    for i in range(hi - 1, -1, -1):
+        if max_end[i] <= start:
+            break
+        ev = evs[i]
+        if ev.end > start:
+            out.append(ev)
+    out.reverse()
+    return out
 
 
 def _assign_depths(evs: list[Event]) -> None:

@@ -63,8 +63,11 @@ class Blame:
         lo, hi = self.window
         totals: dict[str, int] = {}
         for ev in self.covering:
-            if ev.depth == 0 and len(self.covering) > 1:
-                continue  # the outermost frame is the step, not a cause
+            # Exclude step annotations by name, matching _select_leaf. Excluding
+            # by depth instead would drop a genuine top-level cause on any thread
+            # that carries no step annotation at all.
+            if _is_step(ev.name):
+                continue
             ov = ev.overlap(lo, hi)
             if ov > 0:
                 totals[ev.name] = max(totals.get(ev.name, 0), ov)

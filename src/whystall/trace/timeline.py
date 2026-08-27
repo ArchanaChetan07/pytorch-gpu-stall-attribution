@@ -53,6 +53,11 @@ class GapSet:
     idle_subthreshold_us: int
     #: The threshold that produced the split, so a report can state it.
     min_gap_us: int
+    #: Idle after the last device op, when the host outlived the device. This is
+    #: teardown, not starvation, and it is kept separate: folding it into the
+    #: sub-threshold total labels seconds of shutdown as launch overhead, which
+    #: is exactly the kind of quietly wrong number this tool exists to object to.
+    idle_trailing_us: int = 0
 
     @property
     def busy_us(self) -> int:
@@ -102,6 +107,7 @@ def find_gaps(
     gaps: list[Gap] = []
     idle_total = 0
     idle_sub = 0
+    idle_trailing = 0
     cursor = lo
 
     for start, end in busy:
@@ -118,10 +124,10 @@ def find_gaps(
         if end > cursor:
             cursor = min(end, hi)
     if cursor < hi:
-        idle = hi - cursor
-        idle_total += idle
-        # Trailing idle after the last kernel is profiler teardown, not a stall.
-        idle_sub += idle
+        # Trailing idle after the last device op is teardown, not a stall, and
+        # not sub-threshold either. Its own bucket.
+        idle_trailing = hi - cursor
+        idle_total += idle_trailing
 
     _attach_neighbours(view, device, gaps)
     return GapSet(
@@ -131,6 +137,7 @@ def find_gaps(
         idle_total_us=idle_total,
         idle_subthreshold_us=idle_sub,
         min_gap_us=min_gap_us,
+        idle_trailing_us=idle_trailing,
     )
 
 

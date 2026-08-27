@@ -32,7 +32,8 @@ def render_attribution(att: Attribution) -> str:
         )
         lines.append(
             f"  idle {gs.idle_total_us/1000:.1f} ms in {len(gs.gaps)} gaps "
-            f"(+{gs.idle_subthreshold_us/1000:.1f} ms below the {gs.min_gap_us} us floor)"
+            f"(+{gs.idle_subthreshold_us/1000:.1f} ms below the {gs.min_gap_us} us floor, "
+            f"+{gs.idle_trailing_us/1000:.1f} ms trailing teardown)"
         )
         lines.append("")
 

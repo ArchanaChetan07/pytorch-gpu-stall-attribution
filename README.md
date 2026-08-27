@@ -166,7 +166,13 @@ unvalidatable class does not belong in the table.
   withhold. Where you have them even once, run the sweep both ways and publish
   the comparison — see [`docs/injection.md`](docs/injection.md).
 - **Gaps below 20 µs are aggregated, not classified.** At that scale the cause
-  is launch overhead; the total is reported separately so it is not lost.
+  is launch overhead; the total is reported separately so it is not lost, as is
+  trailing idle after the last device op, which is teardown rather than a stall.
+- **Refinement needs samples in the window.** A verdict needs `min_samples` (3)
+  observations inside the blame span, so at the default 200 Hz nothing shorter
+  than ~15 ms can be split. Run the sampler at 500–1000 Hz when short stalls
+  matter; the reports say which windows were skipped and what rate would have
+  resolved them.
 - **Python function events are used when present but not required.** Traces
   collected without `with_stack` attribute slightly more coarsely.
 

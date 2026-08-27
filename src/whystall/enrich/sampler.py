@@ -30,11 +30,18 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+#: Flush cadence. At 500 Hz this bounds an ungraceful kill's loss to ~0.4 s.
+_FLUSH_EVERY = 200
 
 __all__ = [
     "WorkerSample",
@@ -237,14 +244,35 @@ def run(
     duration_s: float | None = None,
     rediscover_every: int = 200,
 ) -> Path:
-    """Sample until the parent exits or duration_s elapses. Writes JSONL.
+    """Sample until the parent exits, duration_s elapses, or SIGTERM arrives.
 
     Workers are rediscovered periodically because a DataLoader with
     persistent_workers=False respawns them every epoch, and a sampler pinned to
     the first generation quietly stops observing anything.
+
+    Two details keep the output readable when the run ends. SIGTERM is handled
+    rather than left to its default, which would kill the process between the
+    write and the flush -- losing the buffered tail, which is precisely the
+    samples covering the end of the profiled window, and leaving a half-written
+    final line that makes the entire log fail to parse. The stream is also
+    flushed periodically, so even an ungraceful kill costs a fraction of a
+    second rather than everything since the last 8 KB boundary.
     """
     if not available():
         raise RuntimeError("the sidecar sampler needs Linux /proc; this host has none")
+
+    stop = False
+
+    def _request_stop(_signum: int, _frame: object) -> None:
+        nonlocal stop
+        stop = True
+
+    previous: dict[int, Any] = {}
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        # Fails outside the main thread; sampling still works, it just loses the
+        # graceful shutdown, so this is not worth raising over.
+        with suppress(OSError, ValueError):
+            previous[sig] = signal.signal(sig, _request_stop)
 
     path = Path(out_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -253,25 +281,33 @@ def run(
     pids = discover_workers(parent_pid)
     n = 0
 
-    with path.open("w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"meta": {"hz": hz, "parent": parent_pid}}) + "\n")
-        next_at = time.monotonic()
-        while True:
-            if deadline is not None and time.monotonic() >= deadline:
-                break
-            if not (_PROC / str(parent_pid)).exists():
-                break
-            if n % rediscover_every == 0:
-                pids = discover_workers(parent_pid)
-            fh.write(json.dumps(sample_once(pids).to_json(), separators=(",", ":")) + "\n")
-            n += 1
-            next_at += period
-            sleep = next_at - time.monotonic()
-            if sleep > 0:
-                time.sleep(sleep)
-            else:
-                # Fell behind; resynchronise rather than accumulating debt.
-                next_at = time.monotonic()
+    try:
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"meta": {"hz": hz, "parent": parent_pid}}) + "\n")
+            next_at = time.monotonic()
+            while not stop:
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                if not (_PROC / str(parent_pid)).exists():
+                    break
+                if n % rediscover_every == 0:
+                    pids = discover_workers(parent_pid)
+                fh.write(json.dumps(sample_once(pids).to_json(), separators=(",", ":")) + "\n")
+                n += 1
+                if n % _FLUSH_EVERY == 0:
+                    fh.flush()
+                next_at += period
+                sleep = next_at - time.monotonic()
+                if sleep > 0:
+                    time.sleep(sleep)
+                else:
+                    # Fell behind; resynchronise rather than accumulating debt.
+                    next_at = time.monotonic()
+            fh.flush()
+    finally:
+        for sig, handler in previous.items():
+            with suppress(OSError, ValueError):
+                signal.signal(sig, handler)
     return path
 
 
@@ -291,7 +327,10 @@ class WindowStats:
     frac_uninterruptible: float
     frac_runnable: float
     frac_sleeping: float
-    #: Block-device bytes read across all workers during the window.
+    #: Block-device bytes read across all workers, measured between the samples
+    #: bracketing the window rather than strictly inside it -- a monotonic
+    #: counter needs a reading either side to be differenced at all. Slightly
+    #: over-counts a short window; the rate below is the figure to reason with.
     read_bytes: int
     read_mb_per_s: float
     #: Fraction of a full core, per worker, spent on CPU during the window.
@@ -322,30 +361,59 @@ class SamplerLog:
     samples: list[Sample]
     hz: int = 0
     meta: dict = None  # type: ignore[assignment]
+    #: Sorted timestamps, so window queries bisect instead of scanning. Without
+    #: this the cost is O(samples) per gap: a 60 s run at 500 Hz against a
+    #: dataloader-bound trace is 30k samples times a few thousand gaps, which
+    #: turns refinement from milliseconds into minutes.
+    _keys: list[int] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.meta is None:
             self.meta = {}
         self.samples.sort(key=lambda s: s.t_mono_ns)
+        self._keys = [s.t_mono_ns for s in self.samples]
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> SamplerLog:
+        """Read a sidecar log.
+
+        A truncated final line is tolerated and counted, not raised on. The
+        sampler is killed by the harness at the end of a run, so a partial last
+        record is an ordinary outcome; refusing to read the other 30,000 samples
+        because of it would throw away the whole run.
+        """
         samples: list[Sample] = []
         meta: dict = {}
+        truncated = 0
         with Path(path).open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
-                d = json.loads(line)
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    truncated += 1
+                    continue
                 if "meta" in d:
                     meta = d["meta"]
                     continue
-                samples.append(Sample.from_json(d))
-        return cls(samples=samples, hz=int(meta.get("hz", 0)), meta=meta)
+                try:
+                    samples.append(Sample.from_json(d))
+                except (KeyError, TypeError, ValueError, IndexError):
+                    truncated += 1
+        log = cls(samples=samples, hz=int(meta.get("hz", 0)), meta=dict(meta))
+        if truncated:
+            log.meta["unreadable_records"] = truncated
+        return log
+
+    def _slice(self, lo_ns: float, hi_ns: float) -> tuple[int, int]:
+        """Half-open index range covering samples with lo_ns <= t <= hi_ns."""
+        return bisect_left(self._keys, lo_ns), bisect_right(self._keys, hi_ns)
 
     def between_ns(self, lo_ns: float, hi_ns: float) -> list[Sample]:
-        return [s for s in self.samples if lo_ns <= s.t_mono_ns <= hi_ns]
+        i, j = self._slice(lo_ns, hi_ns)
+        return self.samples[i:j]
 
     def stats_ns(self, lo_ns: float, hi_ns: float, *, clock_ticks: int = 100) -> WindowStats:
         """Aggregate worker state across a window given in sampler nanoseconds.
@@ -355,7 +423,8 @@ class SamplerLog:
         that contains a single sample reports zero I/O regardless of the truth.
         """
         window_us = max(0.0, (hi_ns - lo_ns) / 1000.0)
-        window = self.between_ns(lo_ns, hi_ns)
+        i, j = self._slice(lo_ns, hi_ns)
+        window = self.samples[i:j]
         if not window:
             return WindowStats(0, 0, window_us, 0.0, 0.0, 0.0, 0, 0.0, 0.0, None, True)
 
@@ -366,7 +435,7 @@ class SamplerLog:
                 states[w.state] = states.get(w.state, 0) + 1
                 obs += 1
 
-        first, last = self._bracket(lo_ns, hi_ns)
+        first, last = self._bracket(i, j)
         read_bytes = 0
         cpu_ticks = 0
         any_read = False
@@ -401,18 +470,18 @@ class SamplerLog:
             read_bytes_unavailable=not any_read,
         )
 
-    def _bracket(self, lo_ns: float, hi_ns: float) -> tuple[Sample | None, Sample | None]:
-        first = last = None
-        for s in self.samples:
-            if s.t_mono_ns <= lo_ns:
-                first = s
-            if s.t_mono_ns >= hi_ns and last is None:
-                last = s
-        inside = self.between_ns(lo_ns, hi_ns)
-        if first is None and inside:
-            first = inside[0]
-        if last is None and inside:
-            last = inside[-1]
+    def _bracket(self, i: int, j: int) -> tuple[Sample | None, Sample | None]:
+        """Widen a window by one sample on each side, for differencing counters.
+
+        Monotonic counters like read_bytes need a reading from before the window
+        and one from after it. A window holding a single sample would otherwise
+        report zero I/O however much the workers actually read. Falls back to the
+        window's own endpoints when it sits at either end of the log.
+        """
+        first = self.samples[i - 1] if i > 0 else (self.samples[i] if i < j else None)
+        last = self.samples[j] if j < len(self.samples) else (
+            self.samples[j - 1] if j > i else None
+        )
         return first, last
 
     def __iter__(self) -> Iterator[Sample]:

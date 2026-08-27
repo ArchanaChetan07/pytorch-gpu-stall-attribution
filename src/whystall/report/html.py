@@ -143,6 +143,7 @@ def _attribution_section(att: Attribution) -> str:
         out.append(_card(_ms(gs.idle_total_us) + " ms", "idle total"))
         out.append(_card(str(len(gs.gaps)), "gaps classified"))
         out.append(_card(_ms(gs.idle_subthreshold_us) + " ms", f"below {gs.min_gap_us} us floor"))
+        out.append(_card(_ms(gs.idle_trailing_us) + " ms", "trailing teardown"))
         out.append(
             _card(_pct(dev.unattributed_share), "unattributed", warn=dev.unattributed_share > 0.25)
         )

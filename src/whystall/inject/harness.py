@@ -84,14 +84,32 @@ class Harness:
             self._start_sampler()
         self._start_profiler()
         self._t0 = time.time()
-        self._clock_points.append(emit_clock_sync())
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        self._clock_points.append(emit_clock_sync())
         self._stop_profiler()
         self._stop_sampler()
+        if self.config.sampler and self._sampler is not None and len(self._clock_points) < 2:
+            # Loud, because the failure is otherwise invisible until analysis:
+            # without two sync points the sampler log cannot be aligned to the
+            # trace and every dataloader gap comes back unrefined.
+            self.config.extra["clock_sync_warning"] = (
+                f"only {len(self._clock_points)} clock sync point(s) landed inside the "
+                f"profiled window; the loop ran {self.step_index} steps but the schedule "
+                f"records steps {self.config.warmup_steps} to "
+                f"{self.config.warmup_steps + self.config.active_steps - 1}. "
+                "Run at least warmup_steps + active_steps iterations."
+            )
+            print("warning: " + self.config.extra["clock_sync_warning"], file=sys.stderr)
         self._write_manifest()
+
+    @property
+    def _first_recorded_step(self) -> int:
+        return self.config.warmup_steps
+
+    @property
+    def _last_recorded_step(self) -> int:
+        return self.config.warmup_steps + self.config.active_steps - 1
 
     def _start_profiler(self) -> None:
         import torch.profiler as tp
@@ -136,7 +154,30 @@ class Harness:
         )
         # Give it a moment to reach steady state so the first profiled step is
         # already covered by samples.
-        time.sleep(0.2)
+        time.sleep(0.4)
+
+        # Then check it is actually alive. A sampler that died on startup --
+        # whystall not importable in this interpreter, no permission on the
+        # target pid, unwritable output path -- would otherwise be discovered
+        # only during analysis, after the GPU hours are spent.
+        if self._sampler.poll() is not None:
+            err = ""
+            if self._sampler.stderr is not None:
+                err = self._sampler.stderr.read().decode("utf-8", "replace").strip()
+            self._sampler = None
+            self.config.extra["sampler_failed"] = err or "exited immediately"
+            print(
+                f"warning: the sidecar sampler exited at startup; dataloader waits "
+                f"will not be split into I/O and CPU.\n  {err}",
+                file=sys.stderr,
+            )
+            return
+        if not self.samples_path.exists():
+            print(
+                f"warning: the sampler is running but has not written "
+                f"{self.samples_path.name} yet; check it after the run.",
+                file=sys.stderr,
+            )
 
     def _stop_sampler(self) -> None:
         if self._sampler is None:
@@ -151,10 +192,24 @@ class Harness:
 
     @contextmanager
     def step(self) -> Iterator[int]:
+        """Wrap one training iteration.
+
+        The clock sync points are emitted here, at the first and last recorded
+        steps, rather than around the profiler's start and stop. With a schedule
+        of wait=0, warmup=W, active=A, iteration i runs under the action for
+        step i: iterations before W are WARMUP and are discarded, and everything
+        after W+A-1 is NONE. Anything emitted in __enter__ or __exit__ therefore
+        never reaches the trace -- which silently costs the sampler its only
+        means of aligning to it.
+        """
         idx = self.step_index
+        if idx == self._first_recorded_step:
+            self._clock_points.append(emit_clock_sync())
         try:
             yield idx
         finally:
+            if idx == self._last_recorded_step:
+                self._clock_points.append(emit_clock_sync())
             self.step_index += 1
             if self._prof is not None:
                 self._prof.step()

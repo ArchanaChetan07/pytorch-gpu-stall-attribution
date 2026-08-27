@@ -96,6 +96,7 @@ def run_one(
     num_workers: int,
     cache_state: str,
     sampler_hz: int,
+    run_name: str | None = None,
 ) -> Path:
     import torch
     from torch.utils.data import DataLoader
@@ -110,7 +111,7 @@ def run_one(
     injector = build(injector_name, magnitude_us)
     config = HarnessConfig(
         out_dir=out_dir,
-        run_name=f"{injector_name}-{magnitude_us}us",
+        run_name=run_name or f"{injector_name}-{magnitude_us}us",
         warmup_steps=max(4, steps // 8),
         active_steps=steps,
         sampler_hz=sampler_hz,
@@ -197,12 +198,12 @@ def main(argv: list[str] | None = None) -> int:
     # Controls first. A sweep without them cannot be interpreted: precision is a
     # lower bound in this setting, and the control distribution is the only
     # thing that turns it back into a measurement.
+    #
+    # Each control gets its own run_name up front. Renaming the files afterwards
+    # would leave every control writing to the same sampler log and silently
+    # overwriting the previous one.
     for i in range(3):
-        run_one("control", 0, **{**common, "out_dir": out_dir})
-        (out_dir / "control-0us.manifest.json").rename(
-            out_dir / f"control-{i}.manifest.json"
-        )
-        (out_dir / "control-0us.trace.json").rename(out_dir / f"control-{i}.trace.json")
+        run_one("control", 0, run_name=f"control-{i}", **common)
 
     total = len(INJECTORS) * len(MAGNITUDES_US)
     done = 0

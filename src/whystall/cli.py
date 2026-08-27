@@ -15,6 +15,7 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from .analysis import attribute, attribute_trace
 from .taxonomy import CLASS_INFO, INJECTABLE_CLASSES, StallClass
@@ -25,12 +26,22 @@ __all__ = ["main"]
 
 
 def _config(args: argparse.Namespace) -> ClassifierConfig:
+    """Build the classifier config from flags.
+
+    Tested against None rather than falsiness on purpose: --min-gap-us 0 is a
+    legitimate request to classify every idle window however short, and `or`
+    would silently substitute the default for it.
+    """
     base = ClassifierConfig()
+
+    def pick(name: str, default: float | int) -> Any:
+        value = getattr(args, name, None)
+        return default if value is None else value
+
     return ClassifierConfig(
-        min_gap_us=getattr(args, "min_gap_us", None) or base.min_gap_us,
-        launch_bound_max_us=getattr(args, "launch_bound_max_us", None)
-        or base.launch_bound_max_us,
-        leaf_dominance=getattr(args, "leaf_dominance", None) or base.leaf_dominance,
+        min_gap_us=pick("min_gap_us", base.min_gap_us),
+        launch_bound_max_us=pick("launch_bound_max_us", base.launch_bound_max_us),
+        leaf_dominance=pick("leaf_dominance", base.leaf_dominance),
         launch_dominance=base.launch_dominance,
         weak_annotation_min=base.weak_annotation_min,
     )
@@ -44,6 +55,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     from .report.text import render_attribution
 
     att = attribute_trace(args.trace, config=_config(args))
+
+    if not att.devices:
+        # Otherwise this produces a confident, empty report. The usual cause is
+        # a trace collected without ProfilerActivity.CUDA.
+        print(
+            f"error: {args.trace} contains no device activity, so there is no idle "
+            "time to attribute. Collect with "
+            "activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA].",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.samples:
         from .enrich.clock import ClockSyncError, fit_clock
@@ -78,13 +100,33 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 # --- validate ----------------------------------------------------------------
 
 
+#: Files that live beside traces in a run directory and are not traces.
+_NOT_TRACES = (".manifest.json", ".report.json", "-report.json", ".samples.jsonl")
+
+
+def _is_trace_file(p: Path) -> bool:
+    name = p.name
+    return p.is_file() and not any(name.endswith(suffix) for suffix in _NOT_TRACES)
+
+
 def _collect_traces(targets: Sequence[str]) -> list[Path]:
+    """Find traces in a directory, a glob, or an explicit path.
+
+    A run directory holds manifests and reports alongside traces, so plain
+    *.json is matched with those excluded rather than requiring the .trace.json
+    convention -- a directory full of obvious traces reporting "no traces found"
+    is a worse failure than occasionally reading one file too many.
+    """
     out: list[Path] = []
     for t in targets:
         p = Path(t)
         if p.is_dir():
-            out.extend(sorted(p.glob("*.trace.json")))
-            out.extend(sorted(p.glob("*.json.gz")))
+            seen: set[Path] = set()
+            for pattern in ("*.trace.json", "*.json.gz", "*.json"):
+                for candidate in sorted(p.glob(pattern)):
+                    if candidate not in seen and _is_trace_file(candidate):
+                        seen.add(candidate)
+                        out.append(candidate)
         elif any(ch in t for ch in "*?["):
             out.extend(sorted(Path().glob(t)))
         else:

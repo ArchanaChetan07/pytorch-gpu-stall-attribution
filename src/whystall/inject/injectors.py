@@ -1,4 +1,4 @@
-"""The seven injectors, one per validatable class.
+﻿"""The seven injectors, one per validatable class.
 
 Each perturbs exactly one thing and does so with a dial, because the deliverable
 is a detection floor per class and a floor needs a sweep.
@@ -38,49 +38,78 @@ __all__ = [
 ]
 
 
-class _Spinner:
-    """Busy-wait calibrated to wall time.
+def spin(micros: float) -> None:
+    """Busy-wait for micros microseconds.
 
     A sleep would be wrong here: sleeping parks the process and looks exactly
     like the I/O case to the sampler, which is the one distinction the whole
-    project is trying to make.
+    project is trying to make. The loop is a deadline check, so it needs no
+    calibration and cannot drift.
+    """
+    if micros <= 0:
+        return
+    deadline = time.perf_counter() + micros / 1e6
+    while time.perf_counter() < deadline:
+        for _ in range(64):
+            pass
+
+
+class _SpinHook:
+    """Burn worker CPU per item. A module-level class so it survives pickling."""
+
+    __slots__ = ("micros",)
+
+    def __init__(self, micros: float) -> None:
+        self.micros = micros
+
+    def __call__(self, _index: Any) -> None:
+        spin(self.micros)
+
+
+class _SleepHook:
+    """Delay per item, as a slower storage tier would.
+
+    The RNG is seeded lazily from the process id rather than at construction:
+    the hook is built in the parent and copied into every worker, so a seed
+    fixed up front would give all eight workers an identical delay sequence and
+    a suspiciously periodic access pattern.
     """
 
-    def __init__(self) -> None:
-        self._per_iter_s = self._calibrate()
+    __slots__ = ("micros", "jitter_frac", "_rng", "_rng_pid")
 
-    @staticmethod
-    def _calibrate(target_s: float = 0.01) -> float:
-        n = 0
-        start = time.perf_counter()
-        while time.perf_counter() - start < target_s:
-            for _ in range(256):
-                pass
-            n += 256
-        elapsed = time.perf_counter() - start
-        return elapsed / max(n, 1)
+    def __init__(self, micros: float, jitter_frac: float) -> None:
+        self.micros = micros
+        self.jitter_frac = jitter_frac
+        self._rng: random.Random | None = None
+        self._rng_pid: int | None = None
 
-    def spin(self, micros: float) -> None:
-        if micros <= 0:
-            return
-        deadline = time.perf_counter() + micros / 1e6
-        while time.perf_counter() < deadline:
-            for _ in range(64):
-                pass
+    def __call__(self, _index: Any) -> None:
+        pid = os.getpid()
+        if self._rng is None or self._rng_pid != pid:
+            self._rng = random.Random(0xD10 ^ pid)
+            self._rng_pid = pid
+        delay = self.micros * (1.0 + self._rng.uniform(-self.jitter_frac, self.jitter_frac))
+        if delay > 0:
+            time.sleep(delay / 1e6)
 
+    def __getstate__(self) -> tuple[float, float]:
+        # random.Random does not survive spawn cleanly and must not be shared
+        # across workers anyway; rebuild it on first use in the child.
+        return self.micros, self.jitter_frac
 
-_SPINNER: _Spinner | None = None
-
-
-def _spinner() -> _Spinner:
-    global _SPINNER
-    if _SPINNER is None:
-        _SPINNER = _Spinner()
-    return _SPINNER
+    def __setstate__(self, state: tuple[float, float]) -> None:
+        self.micros, self.jitter_frac = state
+        self._rng = None
+        self._rng_pid = None
 
 
 class _WrappedDataset:
-    """Applies a per-item perturbation inside the worker process."""
+    """Applies a per-item perturbation inside the worker process.
+
+    Deliberately not a closure. DataLoader with num_workers > 0 pickles the
+    dataset under the spawn and forkserver start methods, and a closure is not
+    picklable -- which fails at the first fetch, on the rented box, mid-sweep.
+    """
 
     def __init__(self, inner: Any, hook: Any) -> None:
         self._inner = inner
@@ -95,7 +124,18 @@ class _WrappedDataset:
         return item
 
     def __getattr__(self, item: str) -> Any:
+        # __getattr__ runs for anything not found normally, including the
+        # dunders pickle probes for before __init__ has restored _inner. Without
+        # this guard that is unbounded recursion during unpickling in a worker.
+        if item.startswith("__") or item in ("_inner", "_hook"):
+            raise AttributeError(item)
         return getattr(self._inner, item)
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {"_inner": self._inner, "_hook": self._hook}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
 
 
 class DataloaderIO(Injector):
@@ -115,16 +155,7 @@ class DataloaderIO(Injector):
         self.jitter_frac = jitter_frac
 
     def wrap_dataset(self, dataset: Any) -> Any:
-        micros = self.magnitude_us
-        jitter = self.jitter_frac
-        rng = random.Random(0xD10)
-
-        def hook(_index: Any) -> None:
-            delay = micros * (1.0 + rng.uniform(-jitter, jitter))
-            if delay > 0:
-                time.sleep(delay / 1e6)
-
-        return _WrappedDataset(dataset, hook)
+        return _WrappedDataset(dataset, _SleepHook(self.magnitude_us, self.jitter_frac))
 
 
 class DataloaderCPU(Injector):
@@ -135,12 +166,7 @@ class DataloaderCPU(Injector):
     label_scope = LabelScope.FETCH
 
     def wrap_dataset(self, dataset: Any) -> Any:
-        micros = self.magnitude_us
-
-        def hook(_index: Any) -> None:
-            _spinner().spin(micros)
-
-        return _WrappedDataset(dataset, hook)
+        return _WrappedDataset(dataset, _SpinHook(self.magnitude_us))
 
 
 class HostToDevice(Injector):
@@ -190,7 +216,7 @@ class HostSync(Injector):
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        _spinner().spin(self.magnitude_us)
+        spin(self.magnitude_us)
         yield
 
 
@@ -216,7 +242,7 @@ class CollectiveStraggler(Injector):
     @contextmanager
     def on_compute(self) -> Iterator[None]:
         if self._is_straggler():
-            _spinner().spin(self.magnitude_us)
+            spin(self.magnitude_us)
         yield
 
 
@@ -251,7 +277,7 @@ class OtherHostCompute(Injector):
 
     @contextmanager
     def on_step_end(self) -> Iterator[None]:
-        _spinner().spin(self.magnitude_us)
+        spin(self.magnitude_us)
         yield
 
 
