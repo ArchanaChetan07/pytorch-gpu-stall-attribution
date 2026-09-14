@@ -33,7 +33,7 @@ Per `docs/sweep.md`, in this order:
 | Method 2 | Detection floor per class at recall 0.9, with bracketing points | pending |
 | Method 3 | Unattributed share on three unmodified codebases | pending |
 | Field | Share of GPU idle that is block-device I/O versus CPU decode, cold cache, ResNet-50 / ImageNet | pending |
-| Cross-check | Agreement between `launch_dispatch` and HTA's *kernel wait* on the same traces | pending |
+| Cross-check | Containment: HTA's *kernel wait* (30 ns threshold) should fall entirely inside `launch_dispatch` (200 µs), with the residual explained by the named classes | pending |
 | Instrument | Fallback I/O injector versus `dm-delay`, matched magnitudes | pending |
 
 Each entry needs, attached and not in a footnote: the machine, the page-cache

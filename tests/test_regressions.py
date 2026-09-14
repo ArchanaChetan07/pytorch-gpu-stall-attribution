@@ -450,6 +450,68 @@ class TestThreadScanIsExactAndCheap:
         ]
 
 
+class TestSubMicrosecondEventsAreNotDropped:
+    """int() truncation turned a 0.4 us kernel into dur=0.
+
+    busy_intervals filters dur > 0, so the kernel vanished from the busy
+    timeline and its slot became idle -- fabricating a stall out of real work,
+    on exactly the dispatch-bound traces this tool is built to diagnose. Chrome
+    ts and dur are floats in microseconds and Kineto emits fractional values, so
+    this is the normal case, not an edge one.
+    """
+
+    def _trace(self, durations):
+        events = []
+        t = 1000.0
+        for i, d in enumerate(durations):
+            events.append({"ph": "X", "cat": "kernel", "name": f"k{i}", "pid": 0,
+                           "tid": 7, "ts": t, "dur": d,
+                           "args": {"correlation": i, "device": 0, "stream": 7}})
+            t += d + 0.5
+        return {"traceEvents": events}
+
+    def test_a_sub_microsecond_kernel_survives(self):
+        view, _ = load_trace_dict(self._trace([0.4, 0.3, 0.45]))
+        assert len(view.gpu) == 3
+        assert all(e.dur >= 1 for e in view.gpu), "a real kernel must not vanish"
+
+    def test_the_rounding_is_recorded_not_silent(self):
+        view, _ = load_trace_dict(self._trace([0.4, 0.3, 12.0]))
+        q = view.meta["whystall_quantisation"]
+        assert q["resolution_us"] == 1
+        assert q["events_below_half_us"] == 2
+
+    def test_a_clean_integer_trace_records_nothing(self):
+        view, _ = load_trace_dict(self._trace([4.0, 8.0]))
+        assert "whystall_quantisation" not in view.meta
+
+    def test_timestamps_round_rather_than_truncate(self):
+        doc = {"traceEvents": [
+            {"ph": "X", "cat": "kernel", "name": "k", "pid": 0, "tid": 7,
+             "ts": 1000.7, "dur": 5.0,
+             "args": {"correlation": 1, "device": 0, "stream": 7}},
+        ]}
+        view, _ = load_trace_dict(doc)
+        assert view.gpu[0].ts == 1001
+
+    def test_zero_duration_events_stay_zero(self):
+        """An instant marker is not a kernel and must not be inflated."""
+        doc = {"traceEvents": [
+            {"ph": "X", "cat": "cpu_op", "name": "marker", "pid": 1, "tid": 1,
+             "ts": 10, "dur": 0, "args": {}},
+        ]}
+        view, _ = load_trace_dict(doc)
+        assert view.cpu[0].dur == 0
+
+    def test_the_report_states_its_own_resolution(self):
+        from whystall.analysis import attribute
+        from whystall.report.text import render_attribution
+
+        view, labels = load_trace_dict(self._trace([0.4] * 6 + [500.0]))
+        text = render_attribution(attribute(view, labels=labels))
+        assert "sub-microsecond" in text
+
+
 class TestCLIParserContract:
     def test_threshold_flags_default_to_none_not_a_value(self):
         """_config distinguishes 'not given' from 'given as zero'."""

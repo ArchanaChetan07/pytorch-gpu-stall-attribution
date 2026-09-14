@@ -66,7 +66,9 @@ class StallClass(str, Enum):
     HOST_SYNC = "host_sync"
 
     #: Short, repeated gaps where the host is in dispatch machinery. Equivalent
-    #: to Holistic Trace Analysis's "kernel wait", and cross-checked against it.
+    #: a strict superset of Holistic Trace Analysis's "kernel wait", whose
+    #: threshold defaults to 30 ns against 200 us here; the difference is
+    #: subdivided out of what HTA reports as host wait.
     LAUNCH_DISPATCH = "launch_dispatch"
 
     #: Host wait with a resolvable cause matching none of the above. Always

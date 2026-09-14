@@ -281,7 +281,16 @@ def rule_dataloader_present(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
 
 
 def rule_launch_dispatch(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
-    """A short gap that no vocabulary explains. Equivalent to HTA's kernel wait.
+    """A short gap that no vocabulary explains.
+
+    Related to, but much wider than, Holistic Trace Analysis's "kernel wait".
+    HTA's threshold is consecutive_kernel_delay, which defaults to 30 ns, so its
+    kernel wait covers essentially back-to-back kernels and nothing else; the
+    default here is launch_bound_max_us, 200 us, which is over six thousand
+    times wider. This class should therefore be a strict superset of HTA's
+    kernel wait, and the difference is carved out of what HTA reports as host
+    wait. That is the thesis, not an accident: host wait is the bucket worth
+    subdividing.
 
     The discriminator is deliberately negative: below launch_bound_max_us the
     host is churning through operator dispatch rather than sitting in any one

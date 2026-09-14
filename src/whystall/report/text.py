@@ -20,6 +20,13 @@ def render_attribution(att: Attribution) -> str:
     lines.append(f"source   {att.view.source}")
     cfg = att.config.as_dict()
     lines.append("config   " + "  ".join(f"{k}={v}" for k, v in cfg.items()))
+    q = att.view.meta.get("whystall_quantisation")
+    if isinstance(q, dict) and q.get("events_rounded"):
+        lines.append(
+            f"note     {q['events_rounded']:,} sub-microsecond durations rounded to "
+            f"1 us resolution ({q.get('events_below_half_us', 0):,} rescued from zero); "
+            "busy time is overstated by under 1 us per event"
+        )
     lines.append("")
 
     for dev in att.devices:

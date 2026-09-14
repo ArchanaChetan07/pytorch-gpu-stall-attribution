@@ -31,7 +31,7 @@ The machine-readable form is `whystall/taxonomy.py`; this is the reasoning.
 | `h2d_copy` | The gap ends in a host-to-device transfer, or a copy frame dominated the window. Pinned versus pageable recorded. | `h2d` | no |
 | `collective` | The gap ends in an NCCL kernel, or a collective frame dominated. | `collective` | no |
 | `host_sync` | A blocking synchronise or scalar readback drained the queue. | `host_sync` | no |
-| `launch_dispatch` | A short gap that no vocabulary explains; the host was churning through operator dispatch. Corresponds to HTA's *kernel wait*. | `launch` | no |
+| `launch_dispatch` | A short gap that no vocabulary explains; the host was churning through operator dispatch. A strict superset of HTA's *kernel wait* — see below. | `launch` | no |
 | `other_host` | Resolvable host work matching no other rule. Always carries its top operator names. | `other_host` | no |
 | `device_dependency` | The next kernel was launched **before** the window opened. The GPU waited on the device, not the host. | `device_dependency` | no |
 | `unattributed` | No blame span resolved. | — | no |
@@ -50,6 +50,31 @@ This is the taxonomy encoding an architectural constraint. The trace-only half
 is the piece that could be contributed to a trace-consuming tool upstream; the
 sampler enrichment is what this tool adds. Collapsing the two would make the
 first half unmergeable.
+
+## How `launch_dispatch` relates to HTA's kernel wait
+
+Not as equivalence, which an earlier draft of this file claimed and which is
+wrong by three orders of magnitude.
+
+HTA separates kernel wait with `consecutive_kernel_delay`, **default 30
+nanoseconds**. That captures kernels which are effectively back to back and
+almost nothing else; every gap a human would notice lands in HTA's *host wait*
+or *other wait*.
+
+`launch_bound_max_us` here defaults to **200 microseconds** — about 6,700 times
+wider — and the rule additionally refuses to fire when any named cause appears
+in the window. So `launch_dispatch` should contain HTA's kernel wait entirely,
+plus a slice that HTA reports as host wait.
+
+That difference is the project, stated numerically. It also gives a concrete
+cross-check to run on real traces: **HTA kernel wait should be a subset of
+`launch_dispatch`**, and the residual should be explainable by the named
+classes. If `launch_dispatch` ever comes back *smaller* than HTA's kernel wait
+on the same trace, one of the two is wrong and it is worth finding out which.
+
+Two details to hold constant when comparing: HTA computes the breakdown for
+**rank 0 only** unless told otherwise, and its threshold is configurable — quote
+whichever value you used.
 
 ## Why `device_dependency` is not host wait
 

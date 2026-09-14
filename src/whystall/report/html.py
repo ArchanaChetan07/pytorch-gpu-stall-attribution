@@ -336,6 +336,21 @@ def render(
         parts.append(f"<span>SCORING <b>{_e(sweep.granularity)}</b></span>")
     parts.append("</div></header>")
 
+    if att is not None:
+        q = att.view.meta.get("whystall_quantisation")
+        if isinstance(q, dict) and q.get("events_rounded"):
+            parts.append(
+                '<section style="padding-top:26px"><div class="note">'
+                "<h3>Resolution</h3><p>This trace carries sub-microsecond event "
+                f"durations. Timestamps here are whole microseconds, so "
+                f"{q['events_rounded']:,} event durations were rounded, of which "
+                f"{q.get('events_below_half_us', 0):,} would otherwise have rounded to "
+                "zero and been dropped from the busy timeline. Busy time is therefore "
+                "overstated by under a microsecond per rounded event, and idle "
+                "understated by the same. Gaps near the classification floor are the "
+                "ones to distrust.</p></div></section>"
+            )
+
     banner = provenance
     if banner is None and is_synthetic(att):
         banner = (

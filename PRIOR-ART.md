@@ -17,7 +17,8 @@ breakdown** that splits GPU idle into three categories:
 
 - **host wait** — the GPU is idle because the CPU is not enqueueing kernels fast
   enough;
-- **kernel wait** — the short overhead between consecutive kernel launches;
+- **kernel wait** — the short overhead between consecutive kernel launches,
+  where "short" means below `consecutive_kernel_delay`, **default 30 ns**;
 - **other wait** — idle that could not be attributed, typically cross-stream
   synchronisation via CUDA events.
 
@@ -25,7 +26,14 @@ It ships in a Meta-maintained repository, is documented in the official PyTorch
 tutorials, and is the tool an engineer at a storage or networking vendor is most
 likely to already have run.
 
-Two things it does not do, and both are the opening:
+That 30 ns default is worth pausing on, because it decides how much room this
+project actually has. A threshold that tight means kernel wait captures kernels
+which are effectively back to back and essentially nothing else. **Every gap a
+human would call a stall lands in host wait or other wait.** The subdivision
+opportunity is therefore larger than a three-way split suggests: it is almost
+the whole of the interesting idle time.
+
+Two things HTA does not do, and both are the opening:
 
 1. **Host wait is a single bucket.** Knowing the host was late tells an operator
    nothing about whether to buy storage, buy CPU cores, or fix their own training
@@ -35,9 +43,17 @@ Two things it does not do, and both are the opening:
    any evaluation against known ground truth. There is no way to tell how often
    it is right.
 
-The documentation now carries **TraceInsight** branding, which suggests a rename
-or a move. Confirm the canonical repository and its external-PR cadence before
-treating it as an upstream target.
+**Repository status, checked 2026-09-14.** `facebookresearch/HolisticTraceAnalysis`
+is alive and actively developed: 555 stars, 98 forks, commits through
+2026-09-11, and pull requests numbered into the 360s. Commits are co-authored by
+`meta-codesync[bot]`, so the GitHub repo is synced with an internal one — but PRs
+are the merge vehicle, not a formality. `CONTRIBUTING.md` asks contributors to
+**open an issue and discuss a feature before building it**, which is both the
+documented process and, conveniently, the plan's own first move.
+
+The **TraceInsight** branding appears only on the rendered documentation, not on
+the repository, which is not archived and carries no rename notice. Treat it as a
+docs-side label, not a move.
 
 ### `torch_tb_profiler` (PyTorch TensorBoard plugin)
 
@@ -111,19 +127,33 @@ between dataloader I/O and dataloader CPU lives in `whystall.enrich`. The
 boundary was drawn before the classifier was written; retrofitting it would have
 meant a rewrite.
 
-**Cross-check against HTA rather than ignoring it.** The `launch_dispatch` class
-is deliberately defined to correspond to HTA's *kernel wait*, and
-`device_dependency` to a large part of its *other wait*. Running both on the same
-trace and reporting the agreement is a validation result; reporting a
-disagreement is a more interesting one. Either way it demonstrates the prior tool
-was understood rather than overlooked, which is the difference between an
-extension and a reinvention.
+**Cross-check against HTA rather than ignoring it.** `launch_dispatch` should be
+a strict *superset* of HTA's kernel wait — 200 µs against 30 ns — with the
+difference carved out of what HTA calls host wait, and `device_dependency` should
+account for a large part of its *other wait*. Running both on the same trace and
+reporting the overlap is a validation result; a disagreement in the wrong
+direction (HTA's kernel wait exceeding `launch_dispatch`) means one of the two is
+wrong and is worth chasing. Either way it demonstrates the prior tool was
+understood rather than overlooked, which is the difference between an extension
+and a reinvention.
+
+An earlier draft of this file called the two *equivalent*. They are not, by three
+orders of magnitude, and the claim is corrected here rather than quietly removed
+because it is exactly the sort of thing the maintainers of the tool being
+extended would catch on first read.
 
 ## Claims still to verify against full text
 
-- The exact current definition of HTA's *kernel wait* boundary, so the
-  `launch_dispatch` correspondence is stated precisely rather than approximately.
-- Whether the TraceInsight rename changes the canonical repository, and what the
-  recent external-contribution cadence looks like there.
+Resolved 2026-09-14: the kernel-wait boundary (`consecutive_kernel_delay`,
+default 30 ns), the repository's status and contribution process, and the
+TraceInsight question. All three are folded into the sections above.
+
+Still open:
+
 - Whether any of the DALI or MosaicML `streaming` benchmark suites report a
   stall-class breakdown that has been missed here.
+- Whether HTA's *other wait* is computed in a way that makes it directly
+  comparable to `device_dependency`, or only loosely so. The docs attribute it to
+  "synchronization among CUDA streams using CUDA events and delays in launching
+  kernels", which is close to the definition used here but not obviously the
+  same rule.

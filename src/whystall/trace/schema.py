@@ -6,9 +6,19 @@ Event and drops the rest -- a realistic training trace runs to millions of
 events, and retaining every 'args' dict is the difference between a tool that
 opens a 400 MB trace and one that does not.
 
-Timestamps are microseconds, as they are in the source document. Nothing in this
-package converts them to floats; interval arithmetic on integers is exact, and
-gap boundaries are compared for equality in the tests.
+Timestamps are whole microseconds. Interval arithmetic on integers is exact and
+gap boundaries are compared for equality in the tests, which is why the source
+document's floats are rounded here rather than carried.
+
+That rounding is a known, bounded approximation and not a free choice. Chrome
+format gives ts and dur as floats in microseconds and Kineto emits fractional
+values, so loading quantises to 1 us; load.py never lets a positive duration
+round to zero, because a vanished kernel becomes fabricated idle. The correct
+fix is integer nanoseconds throughout -- float microseconds cannot work, since
+Kineto timestamps are epoch-scale and float64 spacing there is already coarser
+than a nanosecond -- and that is a unit change across the whole package. Until
+it happens, every report states its own resolution; see the known limits in the
+README.
 """
 
 from __future__ import annotations

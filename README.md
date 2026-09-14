@@ -175,6 +175,17 @@ unvalidatable class does not belong in the table.
   resolved them.
 - **Python function events are used when present but not required.** Traces
   collected without `with_stack` attribute slightly more coarsely.
+- **Timestamps are whole microseconds, and traces are not.** Chrome-format `ts`
+  and `dur` are floats in microseconds and Kineto emits fractional values, so
+  durations are rounded on load — never down to zero, because dropping a real
+  kernel from the busy timeline fabricates idle out of work. Busy time is
+  therefore overstated by under a microsecond per rounded event and idle
+  understated by the same, which matters only for gaps near the 20 µs
+  classification floor. Every report that loads such a trace says so and gives
+  the count. **The proper fix is integer nanoseconds throughout**; float
+  microseconds is not an option, because Kineto timestamps are epoch-scale
+  (~1.7 × 10¹⁵ µs) where float64 spacing is already coarser than a nanosecond.
+  That is a unit change across ~300 sites and is deliberately not yet done.
 
 ## Licence
 
