@@ -124,7 +124,26 @@ sentence.
 
 ## Release the labelled traces
 
+```bash
+whystall pack runs/ --out whystall-stalls-v1/ --license CC-BY-4.0
+```
+
 Every injected run plus its ground-truth annotations. It lets anyone else's
 classifier be scored against yours on identical inputs, which is the fastest
-route from "a repo" to "the benchmark everyone reports on". One afternoon of
-packaging and a licence decision.
+route from "a repo" to "the benchmark everyone reports on".
+
+Three things the packer does that are worth understanding before you publish:
+
+- **It splits by run, not by gap**, grouping on class and dealing magnitudes
+  alternately, so both halves see every class. Calibrate thresholds on the
+  calibration half and report on test. With one repeat per dial setting there is
+  no other honest way to get a calibration set at all.
+- **It ships this tool's own baseline** on the test split, so a competing
+  classifier has a number to beat rather than having to rerun your sweep.
+- **It stamps provenance per run** and refuses to describe a package mixing
+  synthetic and hardware traces as a measurement. Check the card says what you
+  expect before releasing.
+
+Decide the licence deliberately: the traces may carry model and dataset shapes,
+hostnames, and file paths from wherever they were collected. Skim one before
+publishing.

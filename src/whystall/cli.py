@@ -4,6 +4,7 @@
     whystall validate runs/ [--granularity coarse|strict] [--out report.html]
     whystall sample   --pid PID --hz 200 --out s.jsonl
     whystall synth    dataloader --out t.json [--stall-us 5000]
+    whystall pack     runs/ --out dataset/  releasable labelled dataset
     whystall demo     --out demo/          full synthetic sweep, end to end
     whystall selftest                      firewall and taxonomy invariants
 """
@@ -265,6 +266,31 @@ def cmd_demo(args: argparse.Namespace) -> int:
 # --- selftest ----------------------------------------------------------------
 
 
+def cmd_pack(args: argparse.Namespace) -> int:
+    from .dataset import pack
+
+    manifest = pack(
+        args.source,
+        args.out,
+        name=args.name,
+        version=args.dataset_version,
+        license_id=args.license,
+        granularity=args.granularity,
+    )
+    c = manifest.counts
+    print(f"packed {c['runs']} runs into {args.out}")
+    print(f"  {c['gaps']:,} classified gaps, {c['labelled_gaps']:,} labelled")
+    print(f"  splits: {c['calibration']} calibration / {c['test']} test")
+    print(f"  classes: {', '.join(c['classes']) or 'none'}")
+    if manifest.baseline:
+        b = manifest.baseline
+        print(f"  baseline on test: accuracy {b['accuracy']}, "
+              f"macro recall {b['macro_recall']}")
+    for note in manifest.notes:
+        print(f"\nnote: {note}")
+    return 0
+
+
 def cmd_selftest(args: argparse.Namespace) -> int:
     from .synth import build_scenario
     from .trace.load import load_trace
@@ -363,6 +389,15 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--granularity", choices=("coarse", "strict"), default="coarse")
     d.add_argument("--target", type=float, default=0.9)
     d.set_defaults(func=cmd_demo)
+
+    k = sub.add_parser("pack", help="package injected runs into a releasable dataset")
+    k.add_argument("source", help="directory of runs")
+    k.add_argument("--out", required=True, help="directory to write the package into")
+    k.add_argument("--name", default="whystall-stalls")
+    k.add_argument("--dataset-version", default="v1")
+    k.add_argument("--license", default="CC-BY-4.0")
+    k.add_argument("--granularity", choices=("coarse", "strict"), default="coarse")
+    k.set_defaults(func=cmd_pack)
 
     t = sub.add_parser("selftest", help="check the firewall and taxonomy invariants")
     t.set_defaults(func=cmd_selftest)

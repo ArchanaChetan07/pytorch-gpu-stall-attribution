@@ -96,6 +96,23 @@ See [`examples/train_reference.py`](examples/train_reference.py) for a complete
 script and [`docs/sweep.md`](docs/sweep.md) for the experiment plan to write
 *before* renting anything.
 
+## Release the labelled traces
+
+```bash
+whystall pack runs/ --out dataset/
+```
+
+Produces a citable package: the traces with their ground truth intact, a
+checksummed manifest, a calibration/test split by run, this tool's own baseline
+scores on the test split, and a dataset card stating the provenance and the
+limits.
+
+The traces outlast the classifier. A rule set can be rebuilt in a week by
+anyone who reads the writeup; a corpus with per-gap ground truth cannot be
+reconstructed without redoing the injection work, and it is what lets a
+competing classifier be scored on identical inputs instead of on its own
+author's runs.
+
 ## How a gap gets a name
 
 1. Take the device op that ends the idle window.
