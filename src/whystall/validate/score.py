@@ -29,7 +29,7 @@ class RunScore:
     matrix: ConfusionMatrix
     gaps: int
     labelled_gaps: int
-    idle_us: int
+    idle_ns: int
     unattributed_share: float
 
     def summary(self) -> dict[str, Any]:
@@ -39,7 +39,7 @@ class RunScore:
             "magnitude_us": self.magnitude_us,
             "gaps": self.gaps,
             "labelled_gaps": self.labelled_gaps,
-            "idle_us": self.idle_us,
+            "idle_ns": self.idle_ns,
             "unattributed_share": round(self.unattributed_share, 6),
             "matrix": self.matrix.to_dict(),
         }
@@ -62,16 +62,16 @@ def score_attribution(
     regions = injected_regions(att.labels)
     matrix = ConfusionMatrix(granularity=granularity)
     gaps = labelled = 0
-    idle_us = 0
+    idle_ns = 0
 
     for dev in att.devices:
         truths = label_gaps(dev.blames, regions)
         for verdict, region in zip(dev.verdicts, truths, strict=True):
             truth = collapse(region.cls if region else None, granularity)
             pred = collapse(verdict.cls, granularity)
-            matrix.add(truth, pred, us=verdict.dur)
+            matrix.add(truth, pred, ns=verdict.dur_ns)
             gaps += 1
-            idle_us += verdict.dur
+            idle_ns += verdict.dur_ns
             if region is not None:
                 labelled += 1
 
@@ -80,13 +80,13 @@ def score_attribution(
     if regions:
         by_class: dict[StallClass, int] = {}
         for r in regions:
-            by_class[r.cls] = by_class.get(r.cls, 0) + (r.end - r.start)
+            by_class[r.cls] = by_class.get(r.cls, 0) + (r.end_ns - r.start_ns)
         dominant = max(by_class, key=lambda k: by_class[k])
         mags = [r.magnitude_us for r in regions if r.cls is dominant]
         magnitude = max(set(mags), key=mags.count) if mags else 0
 
     unattr = sum(
-        v.dur for v in att.verdicts if v.cls is StallClass.UNATTRIBUTED
+        v.dur_ns for v in att.verdicts if v.cls is StallClass.UNATTRIBUTED
     )
     return RunScore(
         name=name or att.view.source,
@@ -95,8 +95,8 @@ def score_attribution(
         matrix=matrix,
         gaps=gaps,
         labelled_gaps=labelled,
-        idle_us=idle_us,
-        unattributed_share=(unattr / idle_us) if idle_us else 0.0,
+        idle_ns=idle_ns,
+        unattributed_share=(unattr / idle_ns) if idle_ns else 0.0,
     )
 
 
@@ -116,7 +116,7 @@ class Sweep:
         for run in self.runs:
             for key, n in run.matrix.counts.items():
                 out.counts[key] = out.counts.get(key, 0) + n
-                out.micros[key] = out.micros.get(key, 0) + run.matrix.micros.get(key, 0)
+                out.nanos[key] = out.nanos.get(key, 0) + run.matrix.nanos.get(key, 0)
         return out
 
     def magnitudes(self, cls: StallClass) -> list[int]:
@@ -137,10 +137,10 @@ class Sweep:
         return [(m, *self.recall_at(cls, m)) for m in self.magnitudes(cls)]
 
     def unattributed_share(self) -> float:
-        idle = sum(r.idle_us for r in self.runs)
+        idle = sum(r.idle_ns for r in self.runs)
         if not idle:
             return 0.0
-        return sum(r.unattributed_share * r.idle_us for r in self.runs) / idle
+        return sum(r.unattributed_share * r.idle_ns for r in self.runs) / idle
 
     # --- control comparison --------------------------------------------------
 

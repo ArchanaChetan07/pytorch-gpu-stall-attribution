@@ -21,6 +21,7 @@ from .schema import (
     CPU_CATEGORIES,
     GPU_CATEGORIES,
     LABEL_PREFIX,
+    NS_PER_US,
     RUNTIME_CATEGORIES,
     Event,
     Kind,
@@ -64,43 +65,31 @@ def _arg(args: dict[str, Any], *names: str) -> Any:
 
 
 def _as_int(value: Any) -> int | None:
-    """Round, never truncate.
-
-    Chrome-format ts and dur are floats in microseconds and Kineto emits
-    fractional values. int() truncates, which biases every boundary downwards by
-    up to a microsecond; round() halves the error and leaves it unbiased.
-    """
+    """Parse a plain integer field (pid, tid, correlation, bytes)."""
     if value is None:
         return None
     try:
-        return round(float(value))
+        return int(value)
     except (TypeError, ValueError):
         return None
 
 
-def _duration_ticks(value: Any) -> tuple[int, bool]:
-    """Event duration in whole microseconds, and whether it was quantised.
+def _us_to_ns(value: Any) -> int | None:
+    """Convert a microsecond field to integer nanoseconds.
 
-    A positive duration is never allowed to round to zero. Timestamps here are
-    integer microseconds (see the module note in schema.py), so a 0.4 us kernel
-    would otherwise become dur=0 and be dropped from the busy timeline entirely
-    by busy_intervals -- manufacturing idle out of real work, on precisely the
-    dispatch-bound traces this tool exists to diagnose. Rounding it up to 1 us
-    overstates busy time by under a microsecond per event, which is a bounded
-    and reportable error rather than a silent one.
+    Chrome format gives ts and dur as floats in microseconds and Kineto emits
+    fractional values, so this is where the document's unit becomes this
+    package's. Scaling by 1000 before rounding keeps everything the trace
+    recorded: a 0.4 us kernel becomes 400 ns rather than being truncated to
+    zero and dropped from the busy timeline, which is how an earlier version
+    fabricated idle out of real work.
     """
     if value is None:
-        return 0, False
+        return None
     try:
-        raw = float(value)
+        return round(float(value) * NS_PER_US)
     except (TypeError, ValueError):
-        return 0, False
-    if raw <= 0:
-        return 0, False
-    ticks = round(raw)
-    if ticks == 0:
-        return 1, True
-    return ticks, raw != ticks
+        return None
 
 
 def _classify_category(cat: str) -> int:
@@ -139,30 +128,23 @@ def load_trace_dict(
     view = TraceView()
     view.meta = {k: v for k, v in doc.items() if k != "traceEvents"}
     labels: list[Label] = []
-    quantised = 0
-    rescued = 0
+    sub_us = 0
 
     for raw in doc.get("traceEvents", ()):
         if raw.get("ph") != "X":
             continue
         name = raw.get("name") or ""
-        ts = _as_int(raw.get("ts"))
-        if ts is None:
+        ts_ns = _us_to_ns(raw.get("ts"))
+        if ts_ns is None:
             continue
-        raw_dur = raw.get("dur")
-        dur, was_quantised = _duration_ticks(raw_dur)
-        if was_quantised:
-            quantised += 1
-            try:
-                if 0 < float(raw_dur) < 0.5:
-                    rescued += 1
-            except (TypeError, ValueError):
-                pass
+        dur_ns = _us_to_ns(raw.get("dur")) or 0
+        if 0 < dur_ns < NS_PER_US:
+            sub_us += 1
         pid = _as_int(raw.get("pid")) or 0
         tid = _as_int(raw.get("tid")) or 0
 
         if name.startswith(LABEL_PREFIX):
-            lab = Label.parse(name, pid, tid, ts, dur)
+            lab = Label.parse(name, pid, tid, ts_ns, dur_ns)
             if lab is not None:
                 labels.append(lab)
             if not keep_labels:
@@ -180,8 +162,8 @@ def load_trace_dict(
             kind=kind,
             pid=pid,
             tid=tid,
-            ts=ts,
-            dur=dur,
+            ts_ns=ts_ns,
+            dur_ns=dur_ns,
             correlation=_as_int(_arg(args, "correlation", "Correlation")),
             external_id=_as_int(_arg(args, "External id", "external id", "External Id")),
             stream=_as_int(_arg(args, "stream", "Stream")),
@@ -203,23 +185,24 @@ def load_trace_dict(
                 # Keep the earliest runtime call for a correlation id: that is
                 # the launch, not a later synchronise that reuses the id.
                 prev = view.launch_by_correlation.get(ev.correlation)
-                if prev is None or ev.ts < prev.ts:
+                if prev is None or ev.ts_ns < prev.ts_ns:
                     view.launch_by_correlation[ev.correlation] = ev
         else:
             view.cpu.append(ev)
             if PROFILER_STEP_RE.match(name):
                 view.steps.append(ev)
 
-    view.gpu.sort(key=lambda e: (e.ts, e.end))
-    view.runtime.sort(key=lambda e: e.ts)
-    view.steps.sort(key=lambda e: e.ts)
+    view.gpu.sort(key=lambda e: (e.ts_ns, e.end_ns))
+    view.runtime.sort(key=lambda e: e.ts_ns)
+    view.steps.sort(key=lambda e: e.ts_ns)
     view.index_threads()
-    if quantised:
-        # Carried so that every report derived from this trace can state its own
-        # resolution rather than implying more precision than it has.
-        view.meta["whystall_quantisation"] = {
-            "resolution_us": 1,
-            "events_rounded": quantised,
-            "events_below_half_us": rescued,
+    if sub_us:
+        # Informational now rather than a caveat: at nanosecond resolution these
+        # events are represented exactly. Kept because a trace full of
+        # sub-microsecond kernels is itself a finding -- that shape is what a
+        # dispatch-bound workload looks like.
+        view.meta["whystall_resolution"] = {
+            "unit": "ns",
+            "sub_microsecond_events": sub_us,
         }
     return view, labels

@@ -53,17 +53,17 @@ class ConfusionMatrix:
     """Rows are ground truth, columns are predictions."""
 
     counts: dict[tuple[Any, StallClass], int] = field(default_factory=dict)
-    micros: dict[tuple[Any, StallClass], int] = field(default_factory=dict)
+    nanos: dict[tuple[Any, StallClass], int] = field(default_factory=dict)
     granularity: str = "strict"
 
-    def add(self, truth: StallClass | None, pred: StallClass, *, us: int = 0) -> None:
+    def add(self, truth: StallClass | None, pred: StallClass, *, ns: int = 0) -> None:
         key = (truth if truth is not None else NO_TRUTH, pred)
         self.counts[key] = self.counts.get(key, 0) + 1
-        self.micros[key] = self.micros.get(key, 0) + us
+        self.nanos[key] = self.nanos.get(key, 0) + ns
 
     def extend(self, rows: Iterable[tuple[StallClass | None, StallClass, int]]) -> None:
-        for truth, pred, us in rows:
-            self.add(truth, pred, us=us)
+        for truth, pred, ns in rows:
+            self.add(truth, pred, ns=ns)
 
     # --- axes ----------------------------------------------------------------
 
@@ -159,7 +159,7 @@ class ConfusionMatrix:
                     "truth": t.value if isinstance(t, StallClass) else t,
                     "pred": p.value,
                     "n": n,
-                    "us": self.micros.get((t, p), 0),
+                    "ns": self.nanos.get((t, p), 0),
                 }
                 for (t, p), n in sorted(
                     self.counts.items(),

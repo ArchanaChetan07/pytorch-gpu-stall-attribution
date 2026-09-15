@@ -20,43 +20,43 @@ def render_attribution(att: Attribution) -> str:
     lines.append(f"source   {att.view.source}")
     cfg = att.config.as_dict()
     lines.append("config   " + "  ".join(f"{k}={v}" for k, v in cfg.items()))
-    q = att.view.meta.get("whystall_quantisation")
-    if isinstance(q, dict) and q.get("events_rounded"):
+    r = att.view.meta.get("whystall_resolution")
+    if isinstance(r, dict) and r.get("sub_microsecond_events"):
         lines.append(
-            f"note     {q['events_rounded']:,} sub-microsecond durations rounded to "
-            f"1 us resolution ({q.get('events_below_half_us', 0):,} rescued from zero); "
-            "busy time is overstated by under 1 us per event"
+            f"note     {r['sub_microsecond_events']:,} events shorter than 1 us, "
+            "represented exactly at nanosecond resolution. A trace with many of "
+            "these is dispatch-bound by shape."
         )
     lines.append("")
 
     for dev in att.devices:
         gs = dev.gapset
-        span = gs.window[1] - gs.window[0]
+        span = gs.window_ns[1] - gs.window_ns[0]
         lines.append(f"device {dev.device}")
         lines.append(
-            f"  window {span/1000:.1f} ms   busy {gs.busy_us/1000:.1f} ms   "
+            f"  window {span/1e6:.1f} ms   busy {gs.busy_ns/1e6:.1f} ms   "
             f"utilisation {gs.utilisation:.1%}"
         )
         lines.append(
-            f"  idle {gs.idle_total_us/1000:.1f} ms in {len(gs.gaps)} gaps "
-            f"(+{gs.idle_subthreshold_us/1000:.1f} ms below the {gs.min_gap_us} us floor, "
-            f"+{gs.idle_trailing_us/1000:.1f} ms trailing teardown)"
+            f"  idle {gs.idle_total_ns/1e6:.1f} ms in {len(gs.gaps)} gaps "
+            f"(+{gs.idle_subthreshold_ns/1e6:.1f} ms below the {gs.min_gap_ns/1000:g} us "
+            f"floor, +{gs.idle_trailing_ns/1e6:.1f} ms trailing teardown)"
         )
         lines.append("")
 
-        total = dev.classified_us or 1
-        by_us = dev.by_class_us()
+        total = dev.classified_ns or 1
+        by_ns = dev.by_class_ns()
         by_n = dev.by_class_count()
         lines.append(
             "  " + "class".ljust(22) + "idle".rjust(11) + "share".rjust(8)
             + "  gaps".rjust(7) + "  " + "distribution"
         )
-        for cls, us in sorted(by_us.items(), key=lambda kv: -kv[1]):
-            share = us / total
+        for cls, ns in sorted(by_ns.items(), key=lambda kv: -kv[1]):
+            share = ns / total
             lines.append(
                 "  "
                 + CLASS_INFO[cls].label.ljust(22)
-                + f"{us/1000:.1f} ms".rjust(11)
+                + f"{ns/1e6:.1f} ms".rjust(11)
                 + f"{share:.1%}".rjust(8)
                 + f"{by_n[cls]}".rjust(7)
                 + "  "

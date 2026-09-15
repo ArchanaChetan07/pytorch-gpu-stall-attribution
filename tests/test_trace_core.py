@@ -14,21 +14,21 @@ from whystall.trace.schema import Event, Kind
 from whystall.trace.timeline import busy_intervals, find_gaps
 
 
-def _ev(name, ts, dur, tid=1, kind=Kind.CPU, cat="cpu_op"):
-    return Event(name=name, cat=cat, kind=kind, pid=1, tid=tid, ts=ts, dur=dur)
+def _ev(name, ts_ns, dur_ns, tid=1, kind=Kind.CPU, cat="cpu_op"):
+    return Event(name=name, cat=cat, kind=kind, pid=1, tid=tid, ts_ns=ts_ns, dur_ns=dur_ns)
 
 
 class TestEvent:
     def test_overlap_clips_both_ends(self):
         e = _ev("x", 100, 50)
-        assert e.overlap(0, 1000) == 50
-        assert e.overlap(120, 130) == 10
-        assert e.overlap(0, 100) == 0
-        assert e.overlap(150, 200) == 0
-        assert e.overlap(90, 110) == 10
+        assert e.overlap_ns(0, 1000) == 50
+        assert e.overlap_ns(120, 130) == 10
+        assert e.overlap_ns(0, 100) == 0
+        assert e.overlap_ns(150, 200) == 0
+        assert e.overlap_ns(90, 110) == 10
 
     def test_end_is_exclusive_upper(self):
-        assert _ev("x", 10, 5).end == 15
+        assert _ev("x", 10, 5).end_ns == 15
 
 
 class TestLoad:
@@ -120,7 +120,7 @@ class TestThreadIndex:
             events.append({"ph": "X", "cat": "cpu_op", "name": f"op{i}", "pid": 1,
                            "tid": 1, "ts": 10 + i * 4, "dur": 2, "args": {}})
         view, _ = load_trace_dict({"traceEvents": events})
-        covering = view.events_on_thread(1, 9_000, 9_100)
+        covering = view.events_on_thread(1, 9_000 * 1000, 9_100 * 1000)
         assert covering and covering[0].name == "step"
 
     def test_malformed_nesting_does_not_raise(self):
@@ -141,7 +141,7 @@ class TestTimeline:
         b.device_op("k2", 150, 100, 2, stream=20)
         b.device_op("k3", 400, 50, 3, stream=7)
         view, _ = load_trace_dict(b.build())
-        assert busy_intervals(view, 0) == [(100, 250), (400, 450)]
+        assert busy_intervals(view, 0) == [(100_000, 250_000), (400_000, 450_000)]
 
     def test_a_gap_on_one_stream_is_not_idle_if_another_runs(self):
         b = TraceBuilder()
@@ -149,7 +149,7 @@ class TestTimeline:
         b.device_op("nccl", 100, 200, 2, stream=21)
         b.device_op("compute2", 300, 100, 3, stream=7)
         view, _ = load_trace_dict(b.build())
-        gs = find_gaps(view, 0, min_gap_us=1, window=(0, 400))
+        gs = find_gaps(view, 0, min_gap_us=1, window_ns=(0, 400_000))
         assert gs.gaps == []
 
     def test_short_gaps_are_counted_but_not_returned(self):
@@ -158,17 +158,17 @@ class TestTimeline:
         b.device_op("k2", 105, 100, 2, stream=7)
         b.device_op("k3", 500, 100, 3, stream=7)
         view, _ = load_trace_dict(b.build())
-        gs = find_gaps(view, 0, min_gap_us=20, window=(0, 600))
-        assert [g.dur for g in gs.gaps] == [295]
-        assert gs.idle_subthreshold_us == 5
-        assert gs.idle_total_us == 300
+        gs = find_gaps(view, 0, min_gap_us=20, window_ns=(0, 600_000))
+        assert [g.dur_ns for g in gs.gaps] == [295_000]
+        assert gs.idle_subthreshold_ns == 5_000
+        assert gs.idle_total_ns == 300_000
 
     def test_neighbours_bracket_each_gap(self):
         b = TraceBuilder()
         b.device_op("before", 0, 100, 1, stream=7)
         b.device_op("after", 500, 100, 2, stream=7)
         view, _ = load_trace_dict(b.build())
-        gap = find_gaps(view, 0, min_gap_us=20, window=(0, 600)).gaps[0]
+        gap = find_gaps(view, 0, min_gap_us=20, window_ns=(0, 600_000)).gaps[0]
         assert gap.prev_gpu.name == "before"
         assert gap.next_gpu.name == "after"
 
@@ -176,7 +176,7 @@ class TestTimeline:
         b = TraceBuilder()
         b.device_op("k", 0, 250, 1, stream=7)
         view, _ = load_trace_dict(b.build())
-        gs = find_gaps(view, 0, window=(0, 1000))
+        gs = find_gaps(view, 0, window_ns=(0, 1_000_000))
         assert gs.utilisation == pytest.approx(0.25)
 
 
@@ -187,10 +187,10 @@ class TestBlame:
         corr = b.runtime("cudaLaunchKernel", 500, 3)
         b.device_op("blocked", 5000, 100, corr, stream=7)
         view, _ = load_trace_dict(b.build())
-        gap = find_gaps(view, 0, min_gap_us=20, window=(1000, 5100)).gaps[0]
+        gap = find_gaps(view, 0, min_gap_us=20, window_ns=(1_000_000, 5_100_000)).gaps[0]
         blame = resolve_blame(view, gap)
         assert blame.queued_before_gap
-        assert blame.window_us == 0
+        assert blame.window_span_ns == 0
 
     def test_leaf_is_the_deepest_covering_frame(self):
         b = TraceBuilder()
@@ -201,7 +201,7 @@ class TestBlame:
         corr = b.runtime("cudaLaunchKernel", 3000, 3)
         b.device_op("next", 3010, 10, corr, stream=7)
         view, _ = load_trace_dict(b.build())
-        gap = find_gaps(view, 0, min_gap_us=20, window=(1010, 3020)).gaps[0]
+        gap = find_gaps(view, 0, min_gap_us=20, window_ns=(1_010_000, 3_020_000)).gaps[0]
         blame = resolve_blame(view, gap)
         assert blame.leaf.name == "aten::conv2d"
         assert blame.leaf_fraction > 0.9
@@ -214,7 +214,7 @@ class TestBlame:
         corr = b.runtime("cudaLaunchKernel", 2950, 3)
         b.device_op("next", 2960, 10, corr, stream=7)
         view, _ = load_trace_dict(b.build())
-        gap = find_gaps(view, 0, min_gap_us=20, window=(1010, 2970)).gaps[0]
+        gap = find_gaps(view, 0, min_gap_us=20, window_ns=(1_010_000, 2_970_000)).gaps[0]
         blame = resolve_blame(view, gap)
         assert blame.leaf.name == "cudaStreamSynchronize"
 
@@ -223,7 +223,7 @@ class TestBlame:
         b.device_op("first", 0, 10, 1, stream=7)
         b.device_op("orphan", 5000, 10, 999, stream=7)
         view, _ = load_trace_dict(b.build())
-        gap = find_gaps(view, 0, min_gap_us=20, window=(10, 5010)).gaps[0]
+        gap = find_gaps(view, 0, min_gap_us=20, window_ns=(10_000, 5_010_000)).gaps[0]
         blame = resolve_blame(view, gap)
         assert blame.launch is None and not blame.resolved
 
@@ -241,6 +241,6 @@ class TestBounds:
     def test_window_extends_past_the_last_host_step(self):
         """The host always finishes a step before the device does."""
         view, _ = load_trace_dict(build_scenario("clean", steps=4))
-        lo, hi = view.bounds()
-        assert hi >= max(e.end for e in view.gpu)
-        assert lo == view.steps[0].ts
+        lo, hi = view.bounds_ns()
+        assert hi >= max(e.end_ns for e in view.gpu)
+        assert lo == view.steps[0].ts_ns

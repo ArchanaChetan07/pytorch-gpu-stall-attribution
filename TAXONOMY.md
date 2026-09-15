@@ -62,9 +62,12 @@ almost nothing else; every gap a human would notice lands in HTA's *host wait*
 or *other wait*.
 
 `launch_bound_max_us` here defaults to **200 microseconds** — about 6,700 times
-wider — and the rule additionally refuses to fire when any named cause appears
-in the window. So `launch_dispatch` should contain HTA's kernel wait entirely,
-plus a slice that HTA reports as host wait.
+wider — and the rule additionally refuses to fire when any named cause appears in
+the window. So `launch_dispatch` should contain HTA's kernel wait entirely, plus
+a slice that HTA reports as host wait.
+
+Times here are integer nanoseconds internally, so a 30 ns threshold is an exact
+quantity on both sides of the comparison rather than something rounded away.
 
 That difference is the project, stated numerically. It also gives a concrete
 cross-check to run on real traces: **HTA kernel wait should be a subset of

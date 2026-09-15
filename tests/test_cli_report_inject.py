@@ -45,7 +45,7 @@ class TestCLI:
         assert main(["analyze", str(trace), "--out", str(report)]) == 0
         assert report.exists() and report.with_suffix(".json").exists()
         payload = json.loads(report.with_suffix(".json").read_text(encoding="utf-8"))
-        assert payload["attribution"]["devices"][0]["by_class_us"]
+        assert payload["attribution"]["devices"][0]["by_class_ns"]
         assert "utilisation" in capsys.readouterr().out
 
     def test_analyze_reports_missing_clock_sync_rather_than_guessing(self, tmp_path, capsys):

@@ -40,28 +40,28 @@ def sync_label_name(monotonic_ns: int) -> str:
 class ClockMap:
     """Affine map from sampler nanoseconds to trace microseconds."""
 
-    #: trace_us = slope_us_per_ns * (mono_ns - mono0_ns) + trace0_us
-    slope_us_per_ns: float
+    #: trace_ns = slope * (mono_ns - mono0_ns) + trace0_ns
+    slope: float
     mono0_ns: int
-    trace0_us: float
+    trace0_ns: float
     n_points: int
     #: Largest absolute residual across the fit points, microseconds. A report
     #: should quote this: it is the honest error bar on every join the sampler
     #: contributes to.
-    max_residual_us: float
+    max_residual_ns: float
 
-    def to_trace_us(self, monotonic_ns: int) -> float:
-        return self.slope_us_per_ns * (monotonic_ns - self.mono0_ns) + self.trace0_us
+    def to_trace_ns(self, monotonic_ns: int) -> float:
+        return self.slope * (monotonic_ns - self.mono0_ns) + self.trace0_ns
 
-    def to_monotonic_ns(self, trace_us: float) -> float:
-        return (trace_us - self.trace0_us) / self.slope_us_per_ns + self.mono0_ns
+    def to_monotonic_ns(self, trace_ns: float) -> float:
+        return (trace_ns - self.trace0_ns) / self.slope + self.mono0_ns
 
     def summary(self) -> dict[str, float | int]:
         return {
             "points": self.n_points,
-            "slope_us_per_ns": self.slope_us_per_ns,
-            "drift_ppm": (self.slope_us_per_ns / 1e-3 - 1.0) * 1e6,
-            "max_residual_us": round(self.max_residual_us, 3),
+            "slope": self.slope,
+            "drift_ppm": (self.slope - 1.0) * 1e6,
+            "max_residual_us": round(self.max_residual_ns / 1000, 3),
         }
 
 
@@ -80,7 +80,7 @@ def fit_clock(labels: list[Label], *, max_residual_us: float = 500.0) -> ClockMa
             mono_ns = int(lab.parts[0])
         except ValueError:
             continue
-        points.append((mono_ns, lab.ts))
+        points.append((mono_ns, lab.ts_ns))
 
     if len(points) < 2:
         raise ClockSyncError(
@@ -90,7 +90,7 @@ def fit_clock(labels: list[Label], *, max_residual_us: float = 500.0) -> ClockMa
         )
 
     points.sort()
-    mono0, trace0 = points[0]
+    mono0, _trace0 = points[0]
     n = len(points)
     xs = [float(m - mono0) for m, _ in points]
     ys = [float(t) for _, t in points]
@@ -104,16 +104,16 @@ def fit_clock(labels: list[Label], *, max_residual_us: float = 500.0) -> ClockMa
     intercept = my - slope * mx
 
     resid = max(abs(y - (slope * x + intercept)) for x, y in zip(xs, ys, strict=True))
-    if resid > max_residual_us:
+    if resid > max_residual_us * 1000:
         raise ClockSyncError(
-            f"clock fit residual {resid:.1f} us exceeds {max_residual_us:.1f} us over "
-            f"{n} points; the sampler and the trace are not on compatible clocks"
+            f"clock fit residual {resid / 1000:.1f} us exceeds {max_residual_us:.1f} us "
+            f"over {n} points; the sampler and the trace are not on compatible clocks"
         )
 
     return ClockMap(
-        slope_us_per_ns=slope,
+        slope=slope,
         mono0_ns=mono0,
-        trace0_us=intercept,
+        trace0_ns=intercept,
         n_points=n,
-        max_residual_us=resid,
+        max_residual_ns=resid,
     )

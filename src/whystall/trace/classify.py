@@ -40,7 +40,7 @@ from typing import Any
 from ..taxonomy import TRACE_ONLY_CLASSES, StallClass
 from .blame import Blame
 from .load import memcpy_kind
-from .schema import Event
+from .schema import NS_PER_US, Event
 from .timeline import Gap
 
 __all__ = ["ClassifierConfig", "Verdict", "classify", "classify_all", "RULES"]
@@ -130,6 +130,14 @@ class ClassifierConfig:
     #: Minimum overlap for the weak dataloader fallback to fire at all.
     weak_annotation_min: float = 0.15
 
+    @property
+    def min_gap_ns(self) -> int:
+        return round(self.min_gap_us * NS_PER_US)
+
+    @property
+    def launch_bound_max_ns(self) -> int:
+        return round(self.launch_bound_max_us * NS_PER_US)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "min_gap_us": self.min_gap_us,
@@ -154,8 +162,8 @@ class Verdict:
     evidence: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def dur(self) -> int:
-        return self.gap.dur
+    def dur_ns(self) -> int:
+        return self.gap.dur_ns
 
 
 Rule = Callable[[Blame, ClassifierConfig], "Verdict | None"]
@@ -174,8 +182,8 @@ def rule_device_dependency(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
         "device_dependency",
         1.0,
         {
-            "launch_ts": b.t_launch,
-            "gap_start": b.gap.start,
+            "launch_ts_ns": b.t_launch_ns,
+            "gap_start_ns": b.gap.start_ns,
             "next_gpu": b.gap.next_gpu.name if b.gap.next_gpu else None,
         },
     )
@@ -257,7 +265,7 @@ def rule_dataloader_present(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
     Keeps recall on pipelines where pinning or collation splits the wait into
     several frames, none of which clears the dominance threshold on its own.
     """
-    lo, hi = b.window
+    lo, hi = b.window_ns
     span = hi - lo
     if span <= 0:
         return None
@@ -265,7 +273,7 @@ def rule_dataloader_present(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
     which = None
     for ev in b.covering:
         if _DATALOADER_HINT in ev.name.lower():
-            ov = ev.overlap(lo, hi)
+            ov = ev.overlap_ns(lo, hi)
             if ov > total:
                 total, which = ov, ev.name
     frac = total / span
@@ -301,9 +309,9 @@ def rule_launch_dispatch(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
     It runs early, before the dominance rules, because at this scale a "dominant
     frame" is just whichever aten op the window happened to land in.
     """
-    if b.gap.dur > cfg.launch_bound_max_us:
+    if b.gap.dur_ns > cfg.launch_bound_max_ns:
         return None
-    lo, hi = b.window
+    lo, hi = b.window_ns
     span = hi - lo
     if span <= 0:
         return None
@@ -317,15 +325,15 @@ def rule_launch_dispatch(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
             or _has(ev.name, _COLLECTIVE_OPS)
         ):
             return None
-    launch_us = sum(ev.overlap(lo, hi) for ev in b.runtime_spans if _has(ev.name, _LAUNCH_HINTS))
+    launch_ns = sum(ev.overlap_ns(lo, hi) for ev in b.runtime_spans if _has(ev.name, _LAUNCH_HINTS))
     return Verdict(
         b.gap,
         StallClass.LAUNCH_DISPATCH,
         "launch_bound",
         0.6,
         {
-            "launch_fraction": round(launch_us / span, 4),
-            "gap_us": b.gap.dur,
+            "launch_fraction": round(launch_ns / span, 4),
+            "gap_us": round(b.gap.dur_us, 3),
             "frames": [e.name for e in b.covering[-2:]],
         },
     )

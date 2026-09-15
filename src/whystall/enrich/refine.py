@@ -173,10 +173,10 @@ def refine_attribution(
         for verdict, blame in zip(dev.verdicts, dev.blames, strict=True):
             if verdict.cls is not StallClass.DATALOADER:
                 continue
-            lo_us, hi_us = blame.window
-            if hi_us <= lo_us:
-                lo_us, hi_us = verdict.gap.start, verdict.gap.end
-            stats = log.stats_ns(clock.to_monotonic_ns(lo_us), clock.to_monotonic_ns(hi_us))
+            lo_ns, hi_ns = blame.window_ns
+            if hi_ns <= lo_ns:
+                lo_ns, hi_ns = verdict.gap.start_ns, verdict.gap.end_ns
+            stats = log.stats_ns(clock.to_monotonic_ns(lo_ns), clock.to_monotonic_ns(hi_ns))
             outcome = refine_window(stats, cfg)
             verdict.evidence["trace_only_class"] = StallClass.DATALOADER.value
             verdict.evidence["refine_reason"] = outcome.reason

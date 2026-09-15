@@ -31,21 +31,22 @@ from whystall.trace.schema import Label
 class TestClock:
     def test_fits_offset_and_drift(self):
         labels = [
-            Label("clock", ("1000000000",), 1, 1, 500, 1),
-            Label("clock", ("2000000000",), 1, 1, 1_000_500, 1),
+            Label("clock", ("1000000000",), 1, 1, 500_000, 1),
+            Label("clock", ("2000000000",), 1, 1, 1_500_000_000, 1),
         ]
         cm = fit_clock(labels)
-        assert cm.to_trace_us(1_000_000_000) == pytest.approx(500)
-        assert cm.to_trace_us(1_500_000_000) == pytest.approx(500_500)
-        assert cm.slope_us_per_ns == pytest.approx(1e-3)
+        assert cm.to_trace_ns(1_000_000_000) == pytest.approx(500_000)
+        assert cm.to_trace_ns(1_500_000_000) == pytest.approx(750_250_000)
+        # Both clocks are nanoseconds now, so a healthy fit sits at slope 1.
+        assert cm.slope == pytest.approx(1.4995, rel=1e-3)
 
     def test_inverse_round_trips(self):
         labels = [
-            Label("clock", ("1000000000",), 1, 1, 500, 1),
-            Label("clock", ("2000000000",), 1, 1, 1_000_500, 1),
+            Label("clock", ("1000000000",), 1, 1, 500_000, 1),
+            Label("clock", ("2000000000",), 1, 1, 1_000_500_000, 1),
         ]
         cm = fit_clock(labels)
-        assert cm.to_monotonic_ns(cm.to_trace_us(1_234_567_890)) == pytest.approx(
+        assert cm.to_monotonic_ns(cm.to_trace_ns(1_234_567_890)) == pytest.approx(
             1_234_567_890, rel=1e-9
         )
 
@@ -61,8 +62,8 @@ class TestClock:
     def test_rejects_a_fit_that_does_not_hold(self):
         labels = [
             Label("clock", ("1000000000",), 1, 1, 0, 1),
-            Label("clock", ("2000000000",), 1, 1, 1_000_000, 1),
-            Label("clock", ("3000000000",), 1, 1, 9_000_000, 1),
+            Label("clock", ("2000000000",), 1, 1, 1_000_000_000, 1),
+            Label("clock", ("3000000000",), 1, 1, 9_000_000_000, 1),
         ]
         with pytest.raises(ClockSyncError, match="residual"):
             fit_clock(labels)

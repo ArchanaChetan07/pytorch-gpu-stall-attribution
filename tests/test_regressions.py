@@ -114,26 +114,26 @@ class TestTrailingIdleIsNotSubThreshold:
         b = TraceBuilder()
         b.device_op("k", 1000, 500, 1, stream=7)
         view, _ = load_trace_dict(b.build())
-        gs = find_gaps(view, 0, min_gap_us=20, window=(1000, 9000))
-        assert gs.idle_trailing_us == 7500
-        assert gs.idle_subthreshold_us == 0
-        assert gs.idle_total_us == 7500
+        gs = find_gaps(view, 0, min_gap_us=20, window_ns=(1_000_000, 9_000_000))
+        assert gs.idle_trailing_ns == 7_500_000
+        assert gs.idle_subthreshold_ns == 0
+        assert gs.idle_total_ns == 7_500_000
 
     def test_short_gaps_still_land_in_the_sub_threshold_bucket(self):
         b = TraceBuilder()
         b.device_op("a", 0, 100, 1, stream=7)
         b.device_op("b", 105, 100, 2, stream=7)
         view, _ = load_trace_dict(b.build())
-        gs = find_gaps(view, 0, min_gap_us=20, window=(0, 205))
-        assert gs.idle_subthreshold_us == 5
-        assert gs.idle_trailing_us == 0
+        gs = find_gaps(view, 0, min_gap_us=20, window_ns=(0, 205_000))
+        assert gs.idle_subthreshold_ns == 5_000
+        assert gs.idle_trailing_ns == 0
 
     def test_the_three_buckets_account_for_all_idle(self):
         view, _ = load_trace_dict(build_scenario("launch", steps=6, stall_us=34))
         gs = find_gaps(view, 0, min_gap_us=20)
-        classified = sum(g.dur for g in gs.gaps)
+        classified = sum(g.dur_ns for g in gs.gaps)
         assert (
-            classified + gs.idle_subthreshold_us + gs.idle_trailing_us == gs.idle_total_us
+            classified + gs.idle_subthreshold_ns + gs.idle_trailing_ns == gs.idle_total_ns
         )
 
 
@@ -420,7 +420,7 @@ class TestThreadScanIsExactAndCheap:
             events.append({"ph": "X", "cat": "cpu_op", "name": f"op{i}", "pid": 1,
                            "tid": 1, "ts": 10 + i * 4, "dur": 2, "args": {}})
         view, _ = load_trace_dict({"traceEvents": events})
-        covering = view.events_on_thread(1, 9_000_000, 9_000_100)
+        covering = view.events_on_thread(1, 9_000_000_000, 9_000_100_000)
         assert [e.name for e in covering] == ["long_step"]
 
     def test_stops_immediately_once_nothing_can_still_be_open(self):
@@ -431,7 +431,7 @@ class TestThreadScanIsExactAndCheap:
         view, _ = load_trace_dict({"traceEvents": events})
         start = time.perf_counter()
         for i in range(3_000):
-            view.events_on_thread(1, 500_000 + i * 10, 500_000 + i * 10 + 5)
+            view.events_on_thread(1, (500_000 + i * 10) * 1000, (500_000 + i * 10 + 5) * 1000)
         elapsed = time.perf_counter() - start
         assert elapsed < 1.0, f"{elapsed:.1f}s for 3000 lookups"
 
@@ -445,7 +445,7 @@ class TestThreadScanIsExactAndCheap:
              "tid": 1, "ts": 200, "dur": 100, "args": {}},
         ]
         view, _ = load_trace_dict({"traceEvents": events})
-        assert [e.name for e in view.events_on_thread(1, 250, 260)] == [
+        assert [e.name for e in view.events_on_thread(1, 250_000, 260_000)] == [
             "outer", "middle", "inner"
         ]
 
@@ -458,6 +458,10 @@ class TestSubMicrosecondEventsAreNotDropped:
     on exactly the dispatch-bound traces this tool is built to diagnose. Chrome
     ts and dur are floats in microseconds and Kineto emits fractional values, so
     this is the normal case, not an edge one.
+
+    Since the move to integer nanoseconds these events are represented exactly
+    rather than rescued by rounding, so the assertions below check for the value
+    the trace actually recorded.
     """
 
     def _trace(self, durations):
@@ -473,26 +477,31 @@ class TestSubMicrosecondEventsAreNotDropped:
     def test_a_sub_microsecond_kernel_survives(self):
         view, _ = load_trace_dict(self._trace([0.4, 0.3, 0.45]))
         assert len(view.gpu) == 3
-        assert all(e.dur >= 1 for e in view.gpu), "a real kernel must not vanish"
+        assert all(e.dur_ns > 0 for e in view.gpu), "a real kernel must not vanish"
 
-    def test_the_rounding_is_recorded_not_silent(self):
+    def test_durations_are_exact_not_rounded_up(self):
+        """The microsecond version had to inflate 0.4 us to 1 us to save it."""
+        view, _ = load_trace_dict(self._trace([0.4, 0.3, 0.45]))
+        assert [e.dur_ns for e in view.gpu] == [400, 300, 450]
+
+    def test_sub_microsecond_events_are_noted(self):
         view, _ = load_trace_dict(self._trace([0.4, 0.3, 12.0]))
-        q = view.meta["whystall_quantisation"]
-        assert q["resolution_us"] == 1
-        assert q["events_below_half_us"] == 2
+        r = view.meta["whystall_resolution"]
+        assert r["unit"] == "ns"
+        assert r["sub_microsecond_events"] == 2
 
-    def test_a_clean_integer_trace_records_nothing(self):
+    def test_a_trace_without_them_records_nothing(self):
         view, _ = load_trace_dict(self._trace([4.0, 8.0]))
-        assert "whystall_quantisation" not in view.meta
+        assert "whystall_resolution" not in view.meta
 
-    def test_timestamps_round_rather_than_truncate(self):
+    def test_fractional_timestamps_survive(self):
         doc = {"traceEvents": [
             {"ph": "X", "cat": "kernel", "name": "k", "pid": 0, "tid": 7,
              "ts": 1000.7, "dur": 5.0,
              "args": {"correlation": 1, "device": 0, "stream": 7}},
         ]}
         view, _ = load_trace_dict(doc)
-        assert view.gpu[0].ts == 1001
+        assert view.gpu[0].ts_ns == 1_000_700
 
     def test_zero_duration_events_stay_zero(self):
         """An instant marker is not a kernel and must not be inflated."""
@@ -501,15 +510,15 @@ class TestSubMicrosecondEventsAreNotDropped:
              "ts": 10, "dur": 0, "args": {}},
         ]}
         view, _ = load_trace_dict(doc)
-        assert view.cpu[0].dur == 0
+        assert view.cpu[0].dur_ns == 0
 
-    def test_the_report_states_its_own_resolution(self):
-        from whystall.analysis import attribute
-        from whystall.report.text import render_attribution
-
-        view, labels = load_trace_dict(self._trace([0.4] * 6 + [500.0]))
-        text = render_attribution(attribute(view, labels=labels))
-        assert "sub-microsecond" in text
+    def test_a_gap_between_tiny_kernels_is_measured_not_invented(self):
+        """The whole point: the busy timeline keeps sub-microsecond work."""
+        view, _ = load_trace_dict(self._trace([0.4] * 20))
+        gs = find_gaps(view, 0, min_gap_us=0.1)
+        # Each kernel is 400 ns and each gap 500 ns, so nothing is missing.
+        assert all(g.dur_ns == 500 for g in gs.gaps)
+        assert gs.busy_ns == 20 * 400
 
 
 class TestCLIParserContract:

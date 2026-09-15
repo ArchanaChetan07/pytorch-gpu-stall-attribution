@@ -6,19 +6,21 @@ Event and drops the rest -- a realistic training trace runs to millions of
 events, and retaining every 'args' dict is the difference between a tool that
 opens a 400 MB trace and one that does not.
 
-Timestamps are whole microseconds. Interval arithmetic on integers is exact and
-gap boundaries are compared for equality in the tests, which is why the source
-document's floats are rounded here rather than carried.
+Time is integer nanoseconds throughout, and every time-valued name carries an
+_ns suffix so a unit error has to be written on purpose.
 
-That rounding is a known, bounded approximation and not a free choice. Chrome
-format gives ts and dur as floats in microseconds and Kineto emits fractional
-values, so loading quantises to 1 us; load.py never lets a positive duration
-round to zero, because a vanished kernel becomes fabricated idle. The correct
-fix is integer nanoseconds throughout -- float microseconds cannot work, since
-Kineto timestamps are epoch-scale and float64 spacing there is already coarser
-than a nanosecond -- and that is a unit change across the whole package. Until
-it happens, every report states its own resolution; see the known limits in the
-README.
+The source document is not in nanoseconds: Chrome format gives ts and dur as
+*floats* in microseconds, and Kineto emits fractional values. Two units were
+therefore wrong before this one. Integer microseconds silently dropped every
+sub-microsecond kernel, because a 0.4 us duration truncated to zero and vanished
+from the busy timeline, fabricating idle out of real work. Float microseconds
+cannot work either: Kineto timestamps are epoch-scale, around 1.7e15 us, where
+float64 spacing is already coarser than a nanosecond. Scaling to integer
+nanoseconds at load keeps interval arithmetic exact, keeps gap boundaries
+comparable for equality in the tests, and loses nothing the trace recorded.
+
+User-facing knobs stay in microseconds, because that is the unit people think
+in; they convert at the boundary.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from dataclasses import dataclass, field
 
 __all__ = [
     "LABEL_PREFIX",
+    "NS_PER_US",
     "Kind",
     "Event",
     "Label",
@@ -42,6 +45,9 @@ __all__ = [
 #: single string the firewall strips, and the reason the firewall can be
 #: structural rather than a flag -- see whystall.validate.firewall.
 LABEL_PREFIX = "WHYSTALL/"
+
+#: Scale factor between the document's unit and this package's.
+NS_PER_US = 1000
 
 
 class Kind:
@@ -73,8 +79,8 @@ class Event:
     kind: int
     pid: int
     tid: int
-    ts: int
-    dur: int
+    ts_ns: int
+    dur_ns: int
     #: CUPTI correlation id. Links a runtime launch to the device op it produced.
     #: This is the primary linkage; ac2g flow events are the fallback.
     correlation: int | None = None
@@ -88,17 +94,17 @@ class Event:
     depth: int = 0
 
     @property
-    def end(self) -> int:
-        return self.ts + self.dur
+    def end_ns(self) -> int:
+        return self.ts_ns + self.dur_ns
 
-    def overlap(self, start: int, end: int) -> int:
-        """Microseconds of this event inside [start, end)."""
-        lo = self.ts if self.ts > start else start
-        hi = self.end if self.end < end else end
+    def overlap_ns(self, start_ns: int, end_ns: int) -> int:
+        """Nanoseconds of this event inside [start_ns, end_ns)."""
+        lo = self.ts_ns if self.ts_ns > start_ns else start_ns
+        hi = self.end_ns if self.end_ns < end_ns else end_ns
         return hi - lo if hi > lo else 0
 
     def __repr__(self) -> str:
-        return f"Event({self.name!r}, ts={self.ts}, dur={self.dur}, tid={self.tid})"
+        return f"Event({self.name!r}, ts_ns={self.ts_ns}, dur_ns={self.dur_ns}, tid={self.tid})"
 
 
 @dataclass(slots=True, frozen=True)
@@ -113,25 +119,25 @@ class Label:
     parts: tuple[str, ...]
     pid: int
     tid: int
-    ts: int
-    dur: int
+    ts_ns: int
+    dur_ns: int
 
     @property
-    def end(self) -> int:
-        return self.ts + self.dur
+    def end_ns(self) -> int:
+        return self.ts_ns + self.dur_ns
 
     @classmethod
-    def parse(cls, ev_name: str, pid: int, tid: int, ts: int, dur: int) -> Label | None:
+    def parse(cls, ev_name: str, pid: int, tid: int, ts_ns: int, dur_ns: int) -> Label | None:
         if not ev_name.startswith(LABEL_PREFIX):
             return None
         segs = tuple(s for s in ev_name[len(LABEL_PREFIX):].split("/") if s)
         if not segs:
             return None
-        return cls(kind=segs[0], parts=segs[1:], pid=pid, tid=tid, ts=ts, dur=dur)
+        return cls(kind=segs[0], parts=segs[1:], pid=pid, tid=tid, ts_ns=ts_ns, dur_ns=dur_ns)
 
-    def overlap(self, start: int, end: int) -> int:
-        lo = self.ts if self.ts > start else start
-        hi = self.end if self.end < end else end
+    def overlap_ns(self, start_ns: int, end_ns: int) -> int:
+        lo = self.ts_ns if self.ts_ns > start_ns else start_ns
+        hi = self.end_ns if self.end_ns < end_ns else end_ns
         return hi - lo if hi > lo else 0
 
 
@@ -144,17 +150,17 @@ class TraceView:
     property of the type rather than a discipline the caller has to maintain.
     """
 
-    #: Device ops (kernels, memcpys, memsets), sorted by ts.
+    #: Device ops (kernels, memcpys, memsets), sorted by ts_ns.
     gpu: list[Event] = field(default_factory=list)
-    #: Host ops, sorted by ts.
+    #: Host ops, sorted by ts_ns.
     cpu: list[Event] = field(default_factory=list)
-    #: CUDA runtime/driver calls, sorted by ts.
+    #: CUDA runtime/driver calls, sorted by ts_ns.
     runtime: list[Event] = field(default_factory=list)
     #: correlation id -> the runtime call that launched it.
     launch_by_correlation: dict[int, Event] = field(default_factory=dict)
-    #: tid -> that thread's host events, sorted by ts.
+    #: tid -> that thread's host events, sorted by ts_ns.
     cpu_by_tid: dict[int, list[Event]] = field(default_factory=dict)
-    #: tid -> that thread's CUDA runtime calls, sorted by ts. Kept apart from
+    #: tid -> that thread's CUDA runtime calls, sorted by ts_ns. Kept apart from
     #: cpu_by_tid because a blocking cudaStreamSynchronize is a runtime event,
     #: not a cpu_op, and the host-sync rule depends on finding it.
     runtime_by_tid: dict[int, list[Event]] = field(default_factory=dict)
@@ -164,7 +170,7 @@ class TraceView:
     meta: dict = field(default_factory=dict)
     #: Provenance, for the report header.
     source: str = "<memory>"
-    #: Cached ts keys per tid so lookups bisect without rebuilding.
+    #: Cached ts_ns keys per tid so lookups bisect without rebuilding.
     ts_by_tid: dict[int, list[int]] = field(default_factory=dict, repr=False)
     runtime_ts_by_tid: dict[int, list[int]] = field(default_factory=dict, repr=False)
     #: Running maximum of end times, per thread. max_end[i] is the latest end
@@ -188,9 +194,9 @@ class TraceView:
         for tid, evs in by_tid.items():
             # Sort so an enclosing event precedes what it contains: ascending
             # start, then descending duration.
-            evs.sort(key=lambda e: (e.ts, -e.dur))
+            evs.sort(key=lambda e: (e.ts_ns, -e.dur_ns))
             _assign_depths(evs)
-            self.ts_by_tid[tid] = [e.ts for e in evs]
+            self.ts_by_tid[tid] = [e.ts_ns for e in evs]
             self.max_end_by_tid[tid] = _running_max_end(evs)
         self.cpu_by_tid = by_tid
 
@@ -200,23 +206,13 @@ class TraceView:
         self.runtime_ts_by_tid = {}
         self.runtime_max_end_by_tid = {}
         for tid, evs in rt_by_tid.items():
-            evs.sort(key=lambda e: (e.ts, -e.dur))
-            self.runtime_ts_by_tid[tid] = [e.ts for e in evs]
+            evs.sort(key=lambda e: (e.ts_ns, -e.dur_ns))
+            self.runtime_ts_by_tid[tid] = [e.ts_ns for e in evs]
             self.runtime_max_end_by_tid[tid] = _running_max_end(evs)
         self.runtime_by_tid = rt_by_tid
 
-    def runtime_on_thread(self, tid: int, start: int, end: int) -> list[Event]:
-        """CUDA runtime calls on tid overlapping [start, end), in time order."""
-        return _scan_back(
-            self.runtime_by_tid.get(tid),
-            self.runtime_ts_by_tid.get(tid),
-            self.runtime_max_end_by_tid.get(tid),
-            start,
-            end,
-        )
-
-    def events_on_thread(self, tid: int, start: int, end: int) -> list[Event]:
-        """Host events on tid overlapping [start, end), outermost first.
+    def events_on_thread(self, tid: int, start_ns: int, end_ns: int) -> list[Event]:
+        """Host events on tid overlapping [start_ns, end_ns), outermost first.
 
         Events on a thread form a proper stack, but an enclosing frame can start
         arbitrarily far back, so bisecting on start time alone would miss it.
@@ -229,11 +225,21 @@ class TraceView:
             self.cpu_by_tid.get(tid),
             self.ts_by_tid.get(tid),
             self.max_end_by_tid.get(tid),
-            start,
-            end,
+            start_ns,
+            end_ns,
         )
 
-    def bounds(self) -> tuple[int, int]:
+    def runtime_on_thread(self, tid: int, start_ns: int, end_ns: int) -> list[Event]:
+        """CUDA runtime calls on tid overlapping the window, in time order."""
+        return _scan_back(
+            self.runtime_by_tid.get(tid),
+            self.runtime_ts_by_tid.get(tid),
+            self.runtime_max_end_by_tid.get(tid),
+            start_ns,
+            end_ns,
+        )
+
+    def bounds_ns(self) -> tuple[int, int]:
         """The window the analysis is confined to.
 
         Starts at the first ProfilerStep, because idle before profiling began is
@@ -242,11 +248,11 @@ class TraceView:
         does, and closing the window at the host would silently discard the
         trailing device work -- along with any gap inside it.
         """
-        gpu_end = max((e.end for e in self.gpu), default=0)
+        gpu_end = max((e.end_ns for e in self.gpu), default=0)
         if self.steps:
-            return self.steps[0].ts, max(max(s.end for s in self.steps), gpu_end)
+            return self.steps[0].ts_ns, max(max(s.end_ns for s in self.steps), gpu_end)
         if self.gpu:
-            return self.gpu[0].ts, gpu_end
+            return self.gpu[0].ts_ns, gpu_end
         return 0, 0
 
 
@@ -255,7 +261,7 @@ def _running_max_end(evs: list[Event]) -> list[int]:
     out: list[int] = []
     best = 0
     for ev in evs:
-        end = ev.end
+        end = ev.end_ns
         if end > best:
             best = end
         out.append(best)
@@ -266,10 +272,10 @@ def _scan_back(
     evs: list[Event] | None,
     keys: list[int] | None,
     max_end: list[int] | None,
-    start: int,
-    end: int,
+    start_ns: int,
+    end_ns: int,
 ) -> list[Event]:
-    """Events overlapping [start, end), outermost first.
+    """Events overlapping the window, outermost first.
 
     Exact: the prefix-maximum test stops the scan only when no earlier event can
     still be open, so a long enclosing frame is always found however many short
@@ -277,13 +283,13 @@ def _scan_back(
     """
     if not evs or keys is None or max_end is None:
         return []
-    hi = bisect_right(keys, end)
+    hi = bisect_right(keys, end_ns)
     out: list[Event] = []
     for i in range(hi - 1, -1, -1):
-        if max_end[i] <= start:
+        if max_end[i] <= start_ns:
             break
         ev = evs[i]
-        if ev.end > start:
+        if ev.end_ns > start_ns:
             out.append(ev)
     out.reverse()
     return out
@@ -293,11 +299,11 @@ def _assign_depths(evs: list[Event]) -> None:
     """Depth via a tolerant stack: malformed nesting must not raise."""
     stack: list[Event] = []
     for ev in evs:
-        while stack and stack[-1].end <= ev.ts:
+        while stack and stack[-1].end_ns <= ev.ts_ns:
             stack.pop()
         ev.depth = len(stack)
         stack.append(ev)
 
 
 def sort_events(events: Iterable[Event]) -> list[Event]:
-    return sorted(events, key=lambda e: (e.ts, -e.dur))
+    return sorted(events, key=lambda e: (e.ts_ns, -e.dur_ns))

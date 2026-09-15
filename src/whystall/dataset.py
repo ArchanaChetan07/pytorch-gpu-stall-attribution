@@ -73,7 +73,7 @@ class RunEntry:
     #: larger than labelled_gaps -- a stall the prefetch absorbed leaves a
     #: region with no gap to label.
     injected_regions: int
-    idle_us: int
+    idle_ns: int
     sha256: str
     bytes: int
 
@@ -208,7 +208,7 @@ def pack(
         if regions:
             by_class: dict[str, int] = {}
             for r in regions:
-                by_class[r.cls.value] = by_class.get(r.cls.value, 0) + (r.end - r.start)
+                by_class[r.cls.value] = by_class.get(r.cls.value, 0) + (r.end_ns - r.start_ns)
             dominant = max(by_class, key=lambda k: by_class[k])
             mags = [r.magnitude_us for r in regions if r.cls.value == dominant]
             magnitude = max(set(mags), key=mags.count) if mags else 0
@@ -253,7 +253,7 @@ def pack(
                     if truth is not None
                 ),
                 "injected_regions": len(regions),
-                "idle_us": sum(d.classified_us for d in att.devices),
+                "idle_ns": sum(d.classified_ns for d in att.devices),
                 "sha256": digest,
                 "bytes": size,
             }

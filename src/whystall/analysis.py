@@ -25,10 +25,10 @@ class DeviceResult:
     blames: list[Blame]
     verdicts: list[Verdict]
 
-    def by_class_us(self) -> dict[StallClass, int]:
+    def by_class_ns(self) -> dict[StallClass, int]:
         out: dict[StallClass, int] = {}
         for v in self.verdicts:
-            out[v.cls] = out.get(v.cls, 0) + v.dur
+            out[v.cls] = out.get(v.cls, 0) + v.dur_ns
         return out
 
     def by_class_count(self) -> dict[StallClass, int]:
@@ -38,12 +38,12 @@ class DeviceResult:
         return out
 
     @property
-    def classified_us(self) -> int:
-        return sum(v.dur for v in self.verdicts)
+    def classified_ns(self) -> int:
+        return sum(v.dur_ns for v in self.verdicts)
 
     @property
-    def unattributed_us(self) -> int:
-        return sum(v.dur for v in self.verdicts if v.cls is StallClass.UNATTRIBUTED)
+    def unattributed_ns(self) -> int:
+        return sum(v.dur_ns for v in self.verdicts if v.cls is StallClass.UNATTRIBUTED)
 
     @property
     def unattributed_share(self) -> float:
@@ -52,30 +52,30 @@ class DeviceResult:
         Published as-is. It is the cheapest available evidence that the rest of
         the numbers were measured rather than tuned.
         """
-        total = self.classified_us
-        return self.unattributed_us / total if total else 0.0
+        total = self.classified_ns
+        return self.unattributed_ns / total if total else 0.0
 
     @property
-    def host_wait_us(self) -> int:
-        return sum(v.dur for v in self.verdicts if CLASS_INFO[v.cls].host_wait)
+    def host_wait_ns(self) -> int:
+        return sum(v.dur_ns for v in self.verdicts if CLASS_INFO[v.cls].host_wait)
 
     def summary(self) -> dict[str, Any]:
-        span = self.gapset.window[1] - self.gapset.window[0]
+        span = self.gapset.window_ns[1] - self.gapset.window_ns[0]
         return {
             "device": self.device,
-            "window_us": span,
-            "busy_us": self.gapset.busy_us,
+            "window_ns": span,
+            "busy_ns": self.gapset.busy_ns,
             "utilisation": round(self.gapset.utilisation, 6),
-            "idle_total_us": self.gapset.idle_total_us,
-            "idle_subthreshold_us": self.gapset.idle_subthreshold_us,
-            "idle_trailing_us": self.gapset.idle_trailing_us,
-            "min_gap_us": self.gapset.min_gap_us,
+            "idle_total_ns": self.gapset.idle_total_ns,
+            "idle_subthreshold_ns": self.gapset.idle_subthreshold_ns,
+            "idle_trailing_ns": self.gapset.idle_trailing_ns,
+            "min_gap_ns": self.gapset.min_gap_ns,
             "gaps": len(self.gapset.gaps),
-            "classified_us": self.classified_us,
-            "host_wait_us": self.host_wait_us,
-            "unattributed_us": self.unattributed_us,
+            "classified_ns": self.classified_ns,
+            "host_wait_ns": self.host_wait_ns,
+            "unattributed_ns": self.unattributed_ns,
             "unattributed_share": round(self.unattributed_share, 6),
-            "by_class_us": {k.value: v for k, v in sorted(self.by_class_us().items())},
+            "by_class_ns": {k.value: v for k, v in sorted(self.by_class_ns().items())},
             "by_class_count": {k.value: v for k, v in sorted(self.by_class_count().items())},
         }
 

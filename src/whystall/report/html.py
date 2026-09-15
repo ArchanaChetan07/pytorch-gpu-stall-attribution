@@ -115,8 +115,8 @@ def _e(x: Any) -> str:
     return html.escape(str(x))
 
 
-def _ms(us: int | float) -> str:
-    return f"{us/1000:,.1f}"
+def _ms(ns: int | float) -> str:
+    return f"{ns/1e6:,.1f}"
 
 
 def _pct(x: float) -> str:
@@ -136,31 +136,33 @@ def _attribution_section(att: Attribution) -> str:
     out: list[str] = []
     for dev in att.devices:
         gs = dev.gapset
-        total = dev.classified_us or 1
+        total = dev.classified_ns or 1
         out.append(f"<h3>Device {dev.device}</h3>")
         out.append('<div class="cards">')
         out.append(_card(_pct(gs.utilisation), "utilisation"))
-        out.append(_card(_ms(gs.idle_total_us) + " ms", "idle total"))
+        out.append(_card(_ms(gs.idle_total_ns) + " ms", "idle total"))
         out.append(_card(str(len(gs.gaps)), "gaps classified"))
-        out.append(_card(_ms(gs.idle_subthreshold_us) + " ms", f"below {gs.min_gap_us} us floor"))
-        out.append(_card(_ms(gs.idle_trailing_us) + " ms", "trailing teardown"))
+        out.append(
+            _card(_ms(gs.idle_subthreshold_ns) + " ms", f"below {gs.min_gap_ns/1000:g} us floor")
+        )
+        out.append(_card(_ms(gs.idle_trailing_ns) + " ms", "trailing teardown"))
         out.append(
             _card(_pct(dev.unattributed_share), "unattributed", warn=dev.unattributed_share > 0.25)
         )
         out.append("</div>")
 
-        by_us = dev.by_class_us()
+        by_ns = dev.by_class_ns()
         by_n = dev.by_class_count()
         rows = []
-        for cls, us in sorted(by_us.items(), key=lambda kv: -kv[1]):
-            share = us / total
+        for cls, ns in sorted(by_ns.items(), key=lambda kv: -kv[1]):
+            share = ns / total
             info = CLASS_INFO[cls]
             rows.append(
                 "<tr>"
                 f"<td>{_e(info.label)}"
                 f'<div style="font-size:11.5px;color:var(--muted);white-space:normal">'
                 f"{_e(info.summary)}</div></td>"
-                f"<td>{_ms(us)}</td>"
+                f"<td>{_ms(ns)}</td>"
                 f"<td>{_pct(share)}</td>"
                 f"<td>{by_n[cls]}</td>"
                 f'<td><span class="bartrack"><span class="bar" '
@@ -173,7 +175,7 @@ def _attribution_section(att: Attribution) -> str:
         )
         out.append("</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
 
-        host_share = dev.host_wait_us / total
+        host_share = dev.host_wait_ns / total
         out.append(
             f'<p>Of {_ms(total)} ms of classified idle, {_pct(host_share)} is host wait. '
             f"The rest is device-side or unresolved and no amount of faster storage, "
@@ -337,18 +339,16 @@ def render(
     parts.append("</div></header>")
 
     if att is not None:
-        q = att.view.meta.get("whystall_quantisation")
-        if isinstance(q, dict) and q.get("events_rounded"):
+        r = att.view.meta.get("whystall_resolution")
+        if isinstance(r, dict) and r.get("sub_microsecond_events"):
             parts.append(
                 '<section style="padding-top:26px"><div class="note">'
-                "<h3>Resolution</h3><p>This trace carries sub-microsecond event "
-                f"durations. Timestamps here are whole microseconds, so "
-                f"{q['events_rounded']:,} event durations were rounded, of which "
-                f"{q.get('events_below_half_us', 0):,} would otherwise have rounded to "
-                "zero and been dropped from the busy timeline. Busy time is therefore "
-                "overstated by under a microsecond per rounded event, and idle "
-                "understated by the same. Gaps near the classification floor are the "
-                "ones to distrust.</p></div></section>"
+                "<h3>Resolution</h3><p>This trace contains "
+                f"{r['sub_microsecond_events']:,} events shorter than a microsecond. "
+                "They are represented exactly: times here are integer nanoseconds, "
+                "taken from the trace's own fractional-microsecond values. A trace "
+                "with many such events is dispatch-bound by shape, which is itself "
+                "a finding.</p></div></section>"
             )
 
     banner = provenance

@@ -44,12 +44,12 @@ class InjectedRegion:
     magnitude_us: int
     pid: int
     tid: int
-    start: int
-    end: int
+    start_ns: int
+    end_ns: int
 
-    def overlap(self, start: int, end: int) -> int:
-        lo = self.start if self.start > start else start
-        hi = self.end if self.end < end else end
+    def overlap_ns(self, start_ns: int, end_ns: int) -> int:
+        lo = self.start_ns if self.start_ns > start_ns else start_ns
+        hi = self.end_ns if self.end_ns < end_ns else end_ns
         return hi - lo if hi > lo else 0
 
 
@@ -80,8 +80,8 @@ def injected_regions(labels: list[Label]) -> list[InjectedRegion]:
                 magnitude_us=magnitude,
                 pid=lab.pid,
                 tid=lab.tid,
-                start=lab.ts,
-                end=lab.end,
+                start_ns=lab.ts_ns,
+                end_ns=lab.end_ns,
             )
         )
     return out
@@ -99,12 +99,12 @@ def label_gaps(
     """
     out: list[InjectedRegion | None] = []
     for b in blames:
-        gap_lo, gap_hi = b.gap.start, b.gap.end
-        win_lo, win_hi = b.window
+        gap_lo, gap_hi = b.gap.start_ns, b.gap.end_ns
+        win_lo, win_hi = b.window_ns
         best: InjectedRegion | None = None
         best_ov = 0
         for r in regions:
-            ov = max(r.overlap(win_lo, win_hi), r.overlap(gap_lo, gap_hi))
+            ov = max(r.overlap_ns(win_lo, win_hi), r.overlap_ns(gap_lo, gap_hi))
             if ov > best_ov:
                 best_ov, best = ov, r
         out.append(best)

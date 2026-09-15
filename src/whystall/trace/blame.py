@@ -31,11 +31,11 @@ class Blame:
     #: The runtime call that launched the op ending the gap.
     launch: Event | None = None
     launcher_tid: int | None = None
-    t_launch: int | None = None
+    t_launch_ns: int | None = None
     #: True when the launch preceded the gap: a device-side dependency.
     queued_before_gap: bool = False
-    #: The interval on the launching thread that the gap is charged against.
-    window: tuple[int, int] = (0, 0)
+    #: The interval on the launching thread that the gap is charged against, ns.
+    window_ns: tuple[int, int] = (0, 0)
     #: Host events covering the window, outermost first.
     covering: list[Event] = field(default_factory=list)
     #: CUDA runtime calls on the launching thread inside the window.
@@ -47,8 +47,8 @@ class Blame:
     leaf_fraction: float = 0.0
 
     @property
-    def window_us(self) -> int:
-        return max(0, self.window[1] - self.window[0])
+    def window_span_ns(self) -> int:
+        return max(0, self.window_ns[1] - self.window_ns[0])
 
     @property
     def resolved(self) -> bool:
@@ -60,7 +60,7 @@ class Blame:
         This is what keeps 'other host compute' from being a dustbin: the bucket
         always arrives with the operators that produced it.
         """
-        lo, hi = self.window
+        lo, hi = self.window_ns
         totals: dict[str, int] = {}
         for ev in self.covering:
             # Exclude step annotations by name, matching _select_leaf. Excluding
@@ -68,11 +68,11 @@ class Blame:
             # that carries no step annotation at all.
             if _is_step(ev.name):
                 continue
-            ov = ev.overlap(lo, hi)
+            ov = ev.overlap_ns(lo, hi)
             if ov > 0:
                 totals[ev.name] = max(totals.get(ev.name, 0), ov)
         for ev in self.runtime_spans:
-            ov = ev.overlap(lo, hi)
+            ov = ev.overlap_ns(lo, hi)
             if ov > 0:
                 totals[ev.name] = max(totals.get(ev.name, 0), ov)
         return sorted(totals.items(), key=lambda kv: -kv[1])[:n]
@@ -80,7 +80,7 @@ class Blame:
 
 def resolve_blame(view: TraceView, gap: Gap) -> Blame:
     """Resolve one gap. Never raises; an unresolvable gap comes back empty."""
-    blame = Blame(gap=gap, window=(gap.start, gap.end))
+    blame = Blame(gap=gap, window_ns=(gap.start_ns, gap.end_ns))
 
     nxt = gap.next_gpu
     if nxt is None or nxt.correlation is None:
@@ -92,17 +92,17 @@ def resolve_blame(view: TraceView, gap: Gap) -> Blame:
 
     blame.launch = launch
     blame.launcher_tid = launch.tid
-    blame.t_launch = launch.ts
+    blame.t_launch_ns = launch.ts_ns
 
-    if launch.ts <= gap.start:
+    if launch.ts_ns <= gap.start_ns:
         # Enqueued before the device went idle: the GPU was not waiting on us.
         blame.queued_before_gap = True
-        blame.window = (gap.start, gap.start)
+        blame.window_ns = (gap.start_ns, gap.start_ns)
         return blame
 
-    lo = gap.start
-    hi = min(launch.ts, gap.end)
-    blame.window = (lo, hi)
+    lo = gap.start_ns
+    hi = min(launch.ts_ns, gap.end_ns)
+    blame.window_ns = (lo, hi)
     if hi <= lo:
         return blame
 
@@ -148,12 +148,12 @@ def _select_leaf(
     for ev in covering:
         if _is_step(ev.name):
             continue
-        ov = ev.overlap(lo, hi)
+        ov = ev.overlap_ns(lo, hi)
         if ov > 0:
             candidates.append((ev.depth, ov, ev))
             best_ov = max(best_ov, ov)
     for ev in runtime_spans:
-        ov = ev.overlap(lo, hi)
+        ov = ev.overlap_ns(lo, hi)
         if ov > 0:
             candidates.append((_RUNTIME_DEPTH, ov, ev))
             best_ov = max(best_ov, ov)

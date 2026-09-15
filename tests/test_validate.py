@@ -64,7 +64,7 @@ class TestFirewall:
         att = attribute(view, labels=labels)
         att.view.cpu.append(att.view.cpu[0].__class__(
             name=f"{LABEL_PREFIX}inject/h2d/5000", cat="user_annotation", kind=1,
-            pid=1, tid=1, ts=0, dur=1,
+            pid=1, tid=1, ts_ns=0, dur_ns=1,
         ))
         with pytest.raises(FirewallBreach):
             score_attribution(att)
@@ -131,13 +131,13 @@ class TestConfusionMatrix:
     def _matrix(self):
         m = ConfusionMatrix()
         for _ in range(8):
-            m.add(StallClass.HOST_SYNC, StallClass.HOST_SYNC, us=1000)
+            m.add(StallClass.HOST_SYNC, StallClass.HOST_SYNC, ns=1000)
         for _ in range(2):
-            m.add(StallClass.HOST_SYNC, StallClass.H2D_COPY, us=500)
+            m.add(StallClass.HOST_SYNC, StallClass.H2D_COPY, ns=500)
         for _ in range(5):
-            m.add(StallClass.H2D_COPY, StallClass.H2D_COPY, us=300)
+            m.add(StallClass.H2D_COPY, StallClass.H2D_COPY, ns=300)
         for _ in range(3):
-            m.add(None, StallClass.DATALOADER, us=100)
+            m.add(None, StallClass.DATALOADER, ns=100)
         return m
 
     def test_recall_and_precision(self):
@@ -174,9 +174,9 @@ class TestConfusionMatrix:
         conf = m.confusions()
         assert conf == [(StallClass.HOST_SYNC, StallClass.H2D_COPY, 2)]
 
-    def test_microseconds_tracked_alongside_counts(self):
+    def test_nanoseconds_tracked_alongside_counts(self):
         m = self._matrix()
-        assert m.micros[(StallClass.HOST_SYNC, StallClass.HOST_SYNC)] == 8000
+        assert m.nanos[(StallClass.HOST_SYNC, StallClass.HOST_SYNC)] == 8000
 
     def test_renders_without_raising_when_empty(self):
         assert "empty" in ConfusionMatrix().render_text()
@@ -194,16 +194,16 @@ class TestDetectionFloor:
         for magnitude, hits, misses in points:
             m = ConfusionMatrix()
             for _ in range(hits):
-                m.add(StallClass.HOST_SYNC, StallClass.HOST_SYNC, us=10)
+                m.add(StallClass.HOST_SYNC, StallClass.HOST_SYNC, ns=10)
             for _ in range(misses):
-                m.add(StallClass.HOST_SYNC, StallClass.OTHER_HOST, us=10)
+                m.add(StallClass.HOST_SYNC, StallClass.OTHER_HOST, ns=10)
             from whystall.validate.score import RunScore
 
             sweep.add(
                 RunScore(
                     name=f"m{magnitude}", injected=StallClass.HOST_SYNC,
                     magnitude_us=magnitude, matrix=m, gaps=hits + misses,
-                    labelled_gaps=hits + misses, idle_us=(hits + misses) * 10,
+                    labelled_gaps=hits + misses, idle_ns=(hits + misses) * 10,
                     unattributed_share=0.0,
                 )
             )

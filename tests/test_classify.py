@@ -27,7 +27,7 @@ def _one_gap_verdict(builder: TraceBuilder, cfg=None):
 
 
 def _dominant_class(att, device=0):
-    by_us = att.device(device).by_class_us()
+    by_us = att.device(device).by_class_ns()
     return max(by_us, key=lambda k: by_us[k])
 
 
@@ -64,7 +64,7 @@ class TestScenarioAttribution:
     def test_injection_raises_idle_above_control(self, make_attribution):
         clean = make_attribution("clean", steps=8)
         stalled = make_attribution("dataloader", steps=8, stall_us=6000)
-        assert stalled.device(0).gapset.idle_total_us > clean.device(0).gapset.idle_total_us * 5
+        assert stalled.device(0).gapset.idle_total_ns > clean.device(0).gapset.idle_total_ns * 5
 
 
 class TestRuleOrdering:
@@ -152,7 +152,7 @@ class TestArchitecturalBoundary:
         """The premise of the whole sampler: a trace cannot tell these apart."""
         io = make_attribution("dataloader_io", steps=8, stall_us=5000)
         cpu = make_attribution("dataloader_cpu", steps=8, stall_us=5000)
-        assert io.device(0).by_class_us() == cpu.device(0).by_class_us()
+        assert io.device(0).by_class_ns() == cpu.device(0).by_class_ns()
 
 
 class TestConfig:
@@ -161,7 +161,7 @@ class TestConfig:
         few = find_gaps(view, 0, min_gap_us=1000)
         many = find_gaps(view, 0, min_gap_us=20)
         assert len(few.gaps) < len(many.gaps)
-        assert few.idle_total_us == many.idle_total_us
+        assert few.idle_total_ns == many.idle_total_ns
 
     def test_thresholds_are_reported(self):
         cfg = ClassifierConfig(min_gap_us=33)
