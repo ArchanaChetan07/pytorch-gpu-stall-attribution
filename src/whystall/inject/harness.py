@@ -259,9 +259,17 @@ class Harness:
             "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "wall_s": round(time.time() - self._t0, 3),
             "injector": self.injector.describe(),
+            # An injector that places no label on this process makes no
+            # ground-truth claim here either. The collective straggler is the
+            # case: it causes the stall, the other ranks experience it, and only
+            # their traces may assert it. A manifest claiming otherwise would
+            # hand the scorer a label the trace does not contain.
             "ground_truth_class": (
                 self.injector.stall_class.value
-                if self.injector.stall_class is not StallClass.UNATTRIBUTED
+                if (
+                    self.injector.stall_class is not StallClass.UNATTRIBUTED
+                    and self.injector.label_scope != LabelScope.NONE
+                )
                 else None
             ),
             "config": {

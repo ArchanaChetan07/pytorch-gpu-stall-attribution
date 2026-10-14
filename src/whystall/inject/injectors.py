@@ -225,15 +225,28 @@ class CollectiveStraggler(Injector):
 
     Only the straggler rank perturbs; every other rank runs clean and waits.
     That asymmetry is the point -- it is what a slow node looks like.
+
+    The label goes on the ranks that *wait*, not the one that causes the wait.
+    The straggler's own idle is its own spinning -- host compute, correctly not a
+    collective stall -- so labelling its trace `collective` would assert a ground
+    truth that is false on that rank and would score every honest verdict there
+    as a miss. The victim ranks are the ones blocked inside the collective, and
+    they are the only ranks whose gaps this injector is entitled to claim.
+
+    This is why label placement is a property rather than a class attribute: it
+    is the one injector whose ground truth is rank-dependent.
     """
 
     name = "collective"
     stall_class = StallClass.COLLECTIVE
-    label_scope = LabelScope.COMPUTE
 
     def __init__(self, magnitude_us: int = 2000, *, straggler_rank: int = 0) -> None:
         super().__init__(magnitude_us)
         self.straggler_rank = straggler_rank
+
+    @property
+    def label_scope(self) -> str:  # type: ignore[override]
+        return LabelScope.NONE if self._is_straggler() else LabelScope.COMPUTE
 
     def _is_straggler(self) -> bool:
         rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
