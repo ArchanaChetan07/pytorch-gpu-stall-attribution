@@ -1,9 +1,13 @@
-# whystall
+# GPU Stall Attribution
 
-Attribute each GPU idle window to the thing that caused it — dataloader I/O,
-CPU decode, host-to-device copy, collective wait, host sync, dispatch overhead,
-or a device-side dependency — and **measure how often that attribution is right**
-by injecting each cause deliberately and scoring the recovery.
+Attribute each GPU idle window in PyTorch training to the thing that caused it —
+dataloader I/O, CPU decode, host-to-device copy, collective wait, host sync,
+dispatch overhead, or a device-side dependency — and **measure how often that
+attribution is right**, by injecting each cause deliberately and scoring the
+recovery.
+
+Installs as `whystall`. Built on PyTorch profiler (Kineto) traces plus a `/proc`
+sidecar; the core has no dependencies.
 
 ## Read this before the numbers
 

@@ -10,7 +10,11 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BSD-3-Clause" }
 authors = [{ name = "Archana Suresh Patil" }]
-keywords = ["gpu", "profiling", "pytorch", "dataloader", "attribution", "kineto"]
+keywords = [
+  "gpu", "cuda", "pytorch", "profiling", "profiler", "kineto",
+  "performance", "observability", "dataloader", "attribution",
+  "distributed-training", "mlsys", "machine-learning-infrastructure",
+]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -34,8 +38,8 @@ dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.6"]
 whystall = "whystall.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ArchanaChetan07/whystall"
-Issues = "https://github.com/ArchanaChetan07/whystall/issues"
+Homepage = "https://github.com/ArchanaChetan07/gpu-stall-attribution"
+Issues = "https://github.com/ArchanaChetan07/gpu-stall-attribution/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/whystall"]
