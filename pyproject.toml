@@ -38,8 +38,8 @@ dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.6"]
 whystall = "whystall.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ArchanaChetan07/gpu-stall-attribution"
-Issues = "https://github.com/ArchanaChetan07/gpu-stall-attribution/issues"
+Homepage = "https://github.com/ArchanaChetan07/pytorch-gpu-stall-attribution"
+Issues = "https://github.com/ArchanaChetan07/pytorch-gpu-stall-attribution/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/whystall"]
