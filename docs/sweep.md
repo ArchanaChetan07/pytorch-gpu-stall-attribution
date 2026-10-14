@@ -3,6 +3,42 @@
 Write this before renting anything. A sweep improvised on a running meter is a
 sweep you pay for twice.
 
+## Rehearse the sweep on CPU before you rent anything
+
+The orchestration does not need a GPU to be wrong. Run the whole sweep on your
+laptop first, small and fast:
+
+```bash
+python examples/train_reference.py --sweep     --steps 6 --batch-size 4 --num-workers 2 --out /tmp/rehearse
+```
+
+Every run will warn that there is no CUDA device and the traces will contain no
+device ops, so `whystall analyze` will refuse them -- that is correct and is not
+what this is testing. What it does test is everything that is not the GPU: that
+all 33 runs start and finish, that the dataset survives pickling to the worker
+processes, that run names do not collide, that both clock sync points land
+inside the profiled window, and that each manifest comes out complete.
+
+**Use `--num-workers 2` or more, and do it on Windows or macOS if you have one.**
+Those platforms default to the `spawn` start method, which pickles the dataset;
+Linux defaults to `fork`, which does not, and therefore hides this entire class
+of bug until you are paying for it. This rehearsal is how the
+`SyntheticImages`-as-a-local-class bug was found -- a defect that would have
+failed at the first fetch of the first run on any spawn host, and that the
+library's own `_WrappedDataset` had been hardened against while the example
+script quietly had not.
+
+Check a manifest before you stop:
+
+```bash
+cat /tmp/rehearse/control-0.manifest.json
+```
+
+`clock_sync_points_ns` must hold **two** entries. One, or none, means the loop
+ran fewer than `warmup_steps + active_steps` iterations and the sampler could
+never have been aligned -- a failure that is otherwise invisible until analysis,
+long after the box is released.
+
 ## Machine acceptance test, before anything else
 
 Run these on every fresh rental. Each has cost someone a whole run.

@@ -7,10 +7,10 @@ import pytest
 from whystall.synth import TraceBuilder
 from whystall.synth.scenarios import GROUND_TRUTH_CLASS
 from whystall.taxonomy import ENRICHED_CLASSES, TRACE_ONLY_CLASSES, StallClass
-from whystall.trace.blame import resolve_blame
+from whystall.trace.blame import Blame, resolve_blame
 from whystall.trace.classify import RULES, ClassifierConfig, classify
 from whystall.trace.load import load_trace_dict
-from whystall.trace.timeline import find_gaps
+from whystall.trace.timeline import Gap, find_gaps
 
 
 def _one_gap_verdict(builder: TraceBuilder, cfg=None):
@@ -170,3 +170,62 @@ class TestConfig:
             "min_gap_us", "launch_bound_max_us", "leaf_dominance", "launch_dominance"
         }
 
+
+
+class TestHTACorrespondence:
+    """Pins the exact identity against Holistic Trace Analysis.
+
+    HTA's `_analyze_idle_time_for_stream` labels every gap OTHER, promotes it to
+    HOST_WAIT when `ts_runtime > prev_end_ts`, then to KERNEL_WAIT when it is not
+    host wait and the gap is under `consecutive_kernel_delay` (default 30 ns).
+    Its `~is_host_wait` is the same predicate as `queued_before_gap` here, so:
+
+        device_dependency == KERNEL_WAIT union OTHER
+        HTA host_wait     == every other class this tool emits
+
+    PRIOR-ART.md argues from that identity, so it is pinned here rather than left
+    to prose. An earlier draft had the launch_dispatch relation backwards and
+    nothing caught it, because nothing tested it.
+    """
+
+    def _blame(self, *, queued: bool, dur_ns: int) -> Blame:
+        gap = Gap(device=0, start_ns=1_000_000, end_ns=1_000_000 + dur_ns)
+        b = Blame(gap=gap, window_ns=(gap.start_ns, gap.start_ns))
+        b.queued_before_gap = queued
+        return b
+
+    @pytest.mark.parametrize("dur_ns", [10, 30, 1_000, 199_000, 10_000_000])
+    def test_queued_before_gap_is_always_device_dependency(self, dur_ns):
+        """Every gap HTA would call KERNEL_WAIT or OTHER, at any duration."""
+        verdict = classify(self._blame(queued=True, dur_ns=dur_ns))
+        assert verdict.cls is StallClass.DEVICE_DEPENDENCY
+
+    @pytest.mark.parametrize("dur_ns", [10, 29, 30, 1_000])
+    def test_launch_dispatch_is_disjoint_from_hta_kernel_wait(self, dur_ns):
+        """The correction: kernel wait can never reach rule_launch_dispatch.
+
+        These durations straddle HTA's 30 ns default and sit far below this
+        tool's 200 us launch bound, so a superset relation would show up here.
+        It does not, because rule_device_dependency runs first.
+        """
+        verdict = classify(self._blame(queued=True, dur_ns=dur_ns))
+        assert verdict.rule != "launch_dispatch"
+        assert verdict.cls is not StallClass.LAUNCH_DISPATCH
+
+    def test_rule_order_is_what_makes_the_identity_hold(self):
+        """device_dependency must precede launch_dispatch, or the identity breaks."""
+        names = [r.__name__ for r in RULES]
+        assert names.index("rule_device_dependency") < names.index("rule_launch_dispatch")
+        assert names[0] == "rule_device_dependency"
+
+    def test_not_queued_never_yields_device_dependency(self, make_attribution):
+        """The other half: HTA's host_wait is everything else we emit.
+
+        No verdict on a trace may be device_dependency unless its blame said the
+        launch was already enqueued.
+        """
+        for kind in ("dataloader", "h2d", "launch", "clean"):
+            att = make_attribution(kind, steps=6, stall_us=5000)
+            for v in att.verdicts:
+                if v.cls is StallClass.DEVICE_DEPENDENCY:
+                    assert v.rule == "device_dependency"

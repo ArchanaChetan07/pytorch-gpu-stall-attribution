@@ -56,12 +56,27 @@ dependency, and an explicit unattributed residual.
 - **Scope.** Would you rather see this as extra categories inside
   `get_idle_time_breakdown()`, an opt-in argument to it, or a separate analyzer
   that consumes the same trace? I have no attachment to any of these.
-- **Boundaries against existing categories.** On my synthetic traces the class
-  I call launch/dispatch is a strict superset of kernel wait, with the
-  difference coming out of host wait, and device dependency looks like it
-  accounts for much of other wait. On a real trace `<N>` I measured `<...>`.
-  I would rather align the boundaries to yours than introduce a second, subtly
-  different vocabulary.
+- **Boundaries against existing categories.** Reading
+  `_analyze_idle_time_for_stream`, the correspondence looks exact rather than
+  approximate. Your `~is_host_wait` (`ts_runtime <= prev_end_ts`) is the same
+  predicate I use to decide that the launch was already enqueued when the device
+  went idle, and the class I call *device dependency* is the only thing I emit
+  for it. If that reading is right, then over the same gaps:
+
+      device dependency  ==  kernel wait  union  other wait
+      host wait          ==  every other class I emit
+
+  — with `consecutive_kernel_delay` only deciding which of your two names a gap
+  in that union receives, not the size of the union. Which would mean the
+  proposal is precisely "subdivide host wait" and touches neither of the other
+  two categories. On a real trace `<N>` I measured `<...>`.
+
+  Two things I would want your read on. First, whether *other wait* is intended
+  as a residual — it is the default label in the code, while the docs describe it
+  as cross-stream synchronisation, and those are different claims. Second,
+  idle is computed per stream and summed here, whereas I treat a device as busy
+  when any stream is busy; on multi-stream traces that makes the totals differ by
+  construction, and I would rather match your convention than argue for mine.
 - **Validation.** Each class has a matching fault injector, and injected runs
   self-label inside the trace, which gives a per-gap confusion matrix, a
   detection floor per class, and an honest unattributed share. If that kind of
@@ -86,9 +101,15 @@ this is already in progress internally.
 - **Do not lead with the repo.** The question is whether they want the feature.
   A link up front reads as promotion and invites "no thanks" before the idea has
   been considered.
-- **The 30 ns observation is the strongest opening** because it is a specific,
-  checkable fact about their own tool that implies the gap, rather than an
-  assertion that their tool is incomplete.
+- **The identity is the strongest opening**, stronger than the 30 ns observation
+  it replaced. It is derived from their own source, it is checkable in one
+  reading, and it reframes the proposal from "your tool is incomplete" to "your
+  host wait is exactly the set I subdivide, and I touch nothing else." It also
+  demonstrates the code was read rather than the docs skimmed, which is the
+  difference between a contributor and a drive-by.
+- **Lead with the question, not the certainty.** The identity is stated as a
+  reading to be confirmed, because it is one — and because if it is wrong, being
+  told so in the first reply is the cheapest possible outcome.
 - **Offer to align vocabulary.** The likeliest objection is a second set of
   category names diverging from theirs. Conceding that in advance costs nothing.
 - **Expect no answer.** Meta repos sync from an internal one and issues can sit.

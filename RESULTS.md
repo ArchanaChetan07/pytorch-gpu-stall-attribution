@@ -33,7 +33,8 @@ Per `docs/sweep.md`, in this order:
 | Method 2 | Detection floor per class at recall 0.9, with bracketing points | pending |
 | Method 3 | Unattributed share on three unmodified codebases | pending |
 | Field | Share of GPU idle that is block-device I/O versus CPU decode, cold cache, ResNet-50 / ImageNet | pending |
-| Cross-check | Containment: HTA's *kernel wait* (30 ns threshold) should fall entirely inside `launch_dispatch` (200 µs), with the residual explained by the named classes | pending |
+| Cross-check | Identity, on a single-stream trace at `min_gap_us=0`: `device_dependency` = HTA's *kernel wait* ∪ *other wait*, and HTA's *host wait* = every other class emitted here. Exact; any discrepancy is a bug in one of the two tools | pending |
+| Cross-check | Multi-stream divergence: HTA's total idle should exceed this tool's, by exactly the time one stream was quiet while another ran. Report both totals and the stream-merging difference | pending |
 | Instrument | Fallback I/O injector versus `dm-delay`, matched magnitudes | pending |
 
 Each entry needs, attached and not in a footnote: the machine, the page-cache

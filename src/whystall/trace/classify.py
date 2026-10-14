@@ -291,14 +291,18 @@ def rule_dataloader_present(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
 def rule_launch_dispatch(b: Blame, cfg: ClassifierConfig) -> Verdict | None:
     """A short gap that no vocabulary explains.
 
-    Related to, but much wider than, Holistic Trace Analysis's "kernel wait".
-    HTA's threshold is consecutive_kernel_delay, which defaults to 30 ns, so its
-    kernel wait covers essentially back-to-back kernels and nothing else; the
-    default here is launch_bound_max_us, 200 us, which is over six thousand
-    times wider. This class should therefore be a strict superset of HTA's
-    kernel wait, and the difference is carved out of what HTA reports as host
-    wait. That is the thesis, not an accident: host wait is the bucket worth
-    subdividing.
+    Disjoint from Holistic Trace Analysis's "kernel wait", despite the surface
+    resemblance -- an earlier draft had this backwards and called it a superset.
+    HTA's kernel wait requires that the launch was already enqueued when the
+    device went idle (its ~is_host_wait), and every gap meeting that condition is
+    taken by rule_device_dependency, which runs first. A gap HTA calls kernel
+    wait therefore never reaches this rule, at any threshold. The two rules do
+    not see the same gaps; comparing 200 us against HTA's 30 ns default compares
+    thresholds that are never applied to the same window.
+
+    This class lives entirely inside what HTA reports as *host wait*, which is
+    the bucket worth subdividing and the whole thesis. See PRIOR-ART.md for the
+    full identity.
 
     The discriminator is deliberately negative: below launch_bound_max_us the
     host is churning through operator dispatch rather than sitting in any one

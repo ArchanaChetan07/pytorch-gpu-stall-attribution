@@ -19,8 +19,9 @@ breakdown** that splits GPU idle into three categories:
   enough;
 - **kernel wait** — the short overhead between consecutive kernel launches,
   where "short" means below `consecutive_kernel_delay`, **default 30 ns**;
-- **other wait** — idle that could not be attributed, typically cross-stream
-  synchronisation via CUDA events.
+- **other wait** — the residual, and only the residual: the default label kept by
+  any gap that matched neither test above. Cross-stream synchronisation via CUDA
+  events is what tends to land there; it is not what defines it.
 
 It ships in a Meta-maintained repository, is documented in the official PyTorch
 tutorials, and is the tool an engineer at a storage or networking vendor is most
@@ -127,20 +128,58 @@ between dataloader I/O and dataloader CPU lives in `whystall.enrich`. The
 boundary was drawn before the classifier was written; retrofitting it would have
 meant a rewrite.
 
-**Cross-check against HTA rather than ignoring it.** `launch_dispatch` should be
-a strict *superset* of HTA's kernel wait — 200 µs against 30 ns — with the
-difference carved out of what HTA calls host wait, and `device_dependency` should
-account for a large part of its *other wait*. Running both on the same trace and
-reporting the overlap is a validation result; a disagreement in the wrong
-direction (HTA's kernel wait exceeding `launch_dispatch`) means one of the two is
-wrong and is worth chasing. Either way it demonstrates the prior tool was
-understood rather than overlooked, which is the difference between an extension
-and a reinvention.
+**Cross-check against HTA rather than ignoring it.** Read against HTA's actual
+source — `_analyze_idle_time_for_stream` in `hta/analyzers/breakdown_analysis.py`,
+checked 2026-10-14 — the relation is not a loose overlap. It is an exact set
+identity, and that is far better, because an identity is falsifiable to the
+nanosecond.
 
-An earlier draft of this file called the two *equivalent*. They are not, by three
-orders of magnitude, and the claim is corrected here rather than quietly removed
-because it is exactly the sort of thing the maintainers of the tool being
-extended would catch on first read.
+HTA assigns each gap in three steps: every gap starts as `OTHER`; it becomes
+`HOST_WAIT` when `ts_runtime > prev_end_ts`; it becomes `KERNEL_WAIT` when it is
+*not* host wait **and** the gap is shorter than `consecutive_kernel_delay`.
+Whatever matches neither test keeps the default. So:
+
+| HTA category | condition |
+|---|---|
+| `HOST_WAIT` | `ts_runtime > prev_end_ts` |
+| `KERNEL_WAIT` | `ts_runtime <= prev_end_ts` ∧ gap < 30 ns |
+| `OTHER` | `ts_runtime <= prev_end_ts` ∧ gap ≥ 30 ns |
+
+`ts_runtime <= prev_end_ts` is the same predicate as this project's
+`queued_before_gap` (`launch.ts_ns <= gap.start_ns`, `trace/blame.py`): the launch
+was already enqueued when the device went idle. Same evidence, same test, two
+names. And `rule_device_dependency` is rule **one**, so it consumes every gap
+that satisfies it. Therefore, over the same gaps:
+
+- **`device_dependency` ≡ `KERNEL_WAIT` ∪ `OTHER`**, exactly. The 30 ns threshold
+  only decides which of HTA's two names a gap gets; it does not change the union.
+- **HTA's `host_wait` ≡ everything else this tool emits** — the dataloader split,
+  `h2d`, `collective`, `host_sync`, `launch_dispatch`, `other_host`, and the
+  unattributed remainder.
+
+The second line is the thesis stated as an equation. HTA's one undifferentiated
+bucket is precisely the set this tool subdivides into six, which is a cleaner
+claim than "host wait is worth splitting" and can be checked rather than argued.
+
+**A correction, in the opposite direction from the last one.** An earlier draft
+called `launch_dispatch` a strict *superset* of HTA's kernel wait. It is not:
+they are **disjoint**. Kernel wait requires `~is_host_wait`, and any gap meeting
+that condition is taken by `rule_device_dependency` before `rule_launch_dispatch`
+is ever reached. A gap HTA calls kernel wait cannot be classified
+`launch_dispatch` by this tool, at any threshold. The 200 µs–versus–30 ns
+comparison was comparing two rules that never see the same gap.
+
+**What genuinely is not comparable is the gap set, not the rules.** HTA computes
+idle *per stream* and sums; this tool treats a device as busy when *any* stream is
+busy (`trace/timeline.py`). On a multi-stream trace the two do not share a
+denominator and HTA's total idle will be the larger, because per-stream summing
+counts a quiet compute stream as idle while the NCCL stream runs. That is a real
+methodological disagreement and worth stating as one.
+
+It gives the cross-check a sharp form: **on a single-stream trace, scored with
+`min_gap_us=0`, the identities above must hold exactly.** Any discrepancy is a
+bug in one of the two tools. On multi-stream traces, report both totals and the
+stream-merging difference that explains the gap between them.
 
 ## Claims still to verify against full text
 
@@ -148,12 +187,17 @@ Resolved 2026-09-14: the kernel-wait boundary (`consecutive_kernel_delay`,
 default 30 ns), the repository's status and contribution process, and the
 TraceInsight question. All three are folded into the sections above.
 
+Resolved 2026-10-14, against the source rather than the docs: HTA's *other wait*
+is a **residual, not a positive classification** — the default label for any gap
+that is neither host wait nor kernel wait. The documentation describes it as
+"synchronization among CUDA streams using CUDA events and delays in launching
+kernels", which is an interpretation of what tends to land there, not the rule
+that puts it there. Reading the rule is what turned a loose comparison into the
+exact identity recorded above, and what exposed the backwards `launch_dispatch`
+claim. The docs would not have done it; they were in fact what the earlier wrong
+claims were built on.
+
 Still open:
 
 - Whether any of the DALI or MosaicML `streaming` benchmark suites report a
   stall-class breakdown that has been missed here.
-- Whether HTA's *other wait* is computed in a way that makes it directly
-  comparable to `device_dependency`, or only loosely so. The docs attribute it to
-  "synchronization among CUDA streams using CUDA events and delays in launching
-  kernels", which is close to the definition used here but not obviously the
-  same rule.

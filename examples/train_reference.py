@@ -38,6 +38,42 @@ INJECTORS = (
 )
 
 
+class SyntheticImages:
+    """A synthetic image corpus.
+
+    Module scope, not a local class inside build_dataset, for the same reason
+    _WrappedDataset is not a closure: DataLoader pickles the dataset when
+    num_workers > 0 under the spawn and forkserver start methods, and a class
+    defined inside a function cannot be pickled by qualified name. Under fork it
+    works and hides, so this only bites on Windows and macOS -- or on Linux the
+    moment anyone sets a start method, which CUDA safety regularly makes people
+    do, since initialising CUDA before forking workers is its own hazard.
+
+    Duck-typed rather than subclassing torch.utils.data.Dataset, which keeps
+    torch out of this module's import path so --help works without it.
+
+    torch is imported inside __getitem__ rather than held on the instance: a
+    module attribute on self is not picklable and would reintroduce the failure
+    this class exists to avoid. The import is a cached sys.modules lookup.
+    """
+
+    def __init__(self, n: int, px: int) -> None:
+        self.n = n
+        self.px = px
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __getitem__(self, i: int):
+        import torch
+
+        g = torch.Generator().manual_seed(i)
+        return (
+            torch.rand(3, self.px, self.px, generator=g),
+            int(torch.randint(0, 1000, (1,), generator=g).item()),
+        )
+
+
 def build_dataset(size: int = 4096, image_px: int = 224):
     """A synthetic image corpus.
 
@@ -49,24 +85,6 @@ def build_dataset(size: int = 4096, image_px: int = 224):
     what the storage vendors publish against and the comparison has to be
     like-for-like.
     """
-    import torch
-    from torch.utils.data import Dataset
-
-    class SyntheticImages(Dataset):
-        def __init__(self, n: int, px: int) -> None:
-            self.n = n
-            self.px = px
-
-        def __len__(self) -> int:
-            return self.n
-
-        def __getitem__(self, i: int):
-            g = torch.Generator().manual_seed(i)
-            return (
-                torch.rand(3, self.px, self.px, generator=g),
-                int(torch.randint(0, 1000, (1,), generator=g).item()),
-            )
-
     return SyntheticImages(size, image_px)
 
 
