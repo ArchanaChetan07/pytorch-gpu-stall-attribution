@@ -104,6 +104,21 @@ def build_model():
     )
 
 
+def dist_context():
+    """Rank, world size and local rank, whether or not torchrun launched us.
+
+    Returns (rank, world_size, local_rank). Outside torchrun this is (0, 1, 0)
+    and every distributed path below turns itself off.
+    """
+    import os
+
+    return (
+        int(os.environ.get("RANK", "0")),
+        int(os.environ.get("WORLD_SIZE", "1")),
+        int(os.environ.get("LOCAL_RANK", "0")),
+    )
+
+
 def run_one(
     injector_name: str,
     magnitude_us: int,
@@ -121,23 +136,58 @@ def run_one(
 
     from whystall.inject import Harness, HarnessConfig, build
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
+    rank, world_size, local_rank = dist_context()
+    distributed = world_size > 1
+
+    if torch.cuda.is_available():
+        device = f"cuda:{local_rank}" if distributed else "cuda"
+        torch.cuda.set_device(local_rank if distributed else 0)
+    else:
+        device = "cpu"
         print("warning: no CUDA device; the trace will contain no device ops",
               file=sys.stderr)
 
+    if distributed:
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            # nccl on GPUs, gloo otherwise -- gloo is what makes the whole
+            # distributed path rehearsable on a laptop with no CUDA at all.
+            dist.init_process_group(
+                backend="nccl" if torch.cuda.is_available() else "gloo"
+            )
+
     injector = build(injector_name, magnitude_us)
+    # Every rank writes its own files. Without the suffix all ranks race for one
+    # path and you end up with one surviving trace out of N, which looks like a
+    # successful run right up until you score it.
+    base_name = run_name or f"{injector_name}-{magnitude_us}us"
     config = HarnessConfig(
         out_dir=out_dir,
-        run_name=run_name or f"{injector_name}-{magnitude_us}us",
+        run_name=f"{base_name}-rank{rank}" if distributed else base_name,
         warmup_steps=max(4, steps // 8),
         active_steps=steps,
         sampler_hz=sampler_hz,
         cache_state=cache_state,
-        notes=f"reference script, batch={batch_size}, workers={num_workers}",
+        notes=(
+            f"reference script, batch={batch_size}, workers={num_workers}"
+            + (f", world_size={world_size}, rank={rank}" if distributed else "")
+        ),
+        extra={"rank": rank, "world_size": world_size} if distributed else {},
     )
 
     model = build_model().to(device)
+    if distributed:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        # DDP is not decoration here: the gradient allreduce during backward is
+        # the only real collective in this script, and it is the thing the
+        # straggler makes the other ranks wait inside. Without it the collective
+        # injector has nothing to stall on and the second GPU buys nothing.
+        model = DDP(
+            model,
+            device_ids=[local_rank] if torch.cuda.is_available() else None,
+        )
     optimiser = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -179,6 +229,14 @@ def run_one(
                 with harness.step_end():
                     pass
 
+    if distributed:
+        # Barrier before anyone returns: a rank that exits while another is
+        # still inside the allreduce takes the whole job down with a timeout
+        # that looks like a hang, several runs later and nowhere near the cause.
+        import torch.distributed as dist
+
+        dist.barrier()
+
     print(f"wrote {harness.trace_path}")
     return harness.trace_path
 
@@ -191,6 +249,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--magnitude-us", type=int, default=4000)
     p.add_argument("--sweep", action="store_true",
                    help="run every injector at every magnitude, plus controls")
+    p.add_argument("--injectors", default=None,
+                   help="comma-separated subset to sweep, e.g. 'collective'. "
+                        "Use this to run the collective phase on its own, so the "
+                        "other classes are not measured under DDP")
+    p.add_argument("--no-controls", action="store_true",
+                   help="skip the control runs (phase 2 reuses phase 1's)")
     p.add_argument("--out", default="runs")
     p.add_argument("--steps", type=int, default=40)
     p.add_argument("--batch-size", type=int, default=64)
@@ -213,6 +277,37 @@ def main(argv: list[str] | None = None) -> int:
         run_one(args.injector, args.magnitude_us, **common)
         return 0
 
+    # Which classes this phase sweeps.
+    #
+    # The sweep runs in two phases on purpose, and they must not be merged.
+    # Wrapping the model in DDP puts a gradient allreduce in every step, so a
+    # dataloader or h2d run measured under torchrun is no longer the run the
+    # plan specifies -- it carries a collective the single-process baseline
+    # never had. Phase 1 therefore sweeps the six single-process classes with no
+    # DDP at all; phase 2 adds only `collective`, under torchrun, and reuses
+    # phase 1's controls.
+    _, world_size, _ = dist_context()
+    if args.injectors:
+        injectors = tuple(n.strip() for n in args.injectors.split(",") if n.strip())
+        unknown = [n for n in injectors if n not in INJECTORS + ("collective",)]
+        if unknown:
+            print(f"error: unknown injector(s) {unknown}; known: "
+                  f"{sorted(INJECTORS + ('collective',))}", file=sys.stderr)
+            return 2
+    else:
+        injectors = INJECTORS
+    if "collective" in injectors and world_size == 1:
+        print("error: the collective class needs more than one rank. Launch it as\n"
+              "    torchrun --nproc_per_node=2 examples/train_reference.py \\\n"
+              "        --sweep --injectors collective --no-controls --out runs/",
+              file=sys.stderr)
+        return 2
+    if world_size > 1 and any(n != "collective" for n in injectors):
+        print("warning: running non-collective classes under torchrun wraps the "
+              "model in DDP, which adds a gradient allreduce to every step. Those "
+              "runs will not match a single-process baseline. Phase 1 is meant to "
+              "run without torchrun.", file=sys.stderr)
+
     # Controls first. A sweep without them cannot be interpreted: precision is a
     # lower bound in this setting, and the control distribution is the only
     # thing that turns it back into a measurement.
@@ -220,12 +315,13 @@ def main(argv: list[str] | None = None) -> int:
     # Each control gets its own run_name up front. Renaming the files afterwards
     # would leave every control writing to the same sampler log and silently
     # overwriting the previous one.
-    for i in range(3):
-        run_one("control", 0, run_name=f"control-{i}", **common)
+    if not args.no_controls:
+        for i in range(3):
+            run_one("control", 0, run_name=f"control-{i}", **common)
 
-    total = len(INJECTORS) * len(MAGNITUDES_US)
+    total = len(injectors) * len(MAGNITUDES_US)
     done = 0
-    for name in INJECTORS:
+    for name in injectors:
         for magnitude in MAGNITUDES_US:
             done += 1
             print(f"[{done}/{total}] {name} at {magnitude} us")

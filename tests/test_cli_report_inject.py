@@ -252,3 +252,45 @@ class TestInjectors:
 def _attributed(kind: str, **kwargs):
     view, labels = load_trace_dict(build_scenario(kind, steps=6, stall_us=5000, **kwargs))
     return attribute(view, labels=labels)
+
+
+class TestCollectiveGroundTruthIsRankDependent:
+    """The straggler causes the stall; the other ranks are the ones that wait.
+
+    Labelling the straggler's own trace `collective` would assert a ground truth
+    that is false there -- its idle is its own spinning, which is host compute --
+    and would score every correct verdict on that rank as a miss. Only ranks that
+    block inside the collective may claim it.
+
+    Pinned because the asymmetry is invisible on a single-GPU box: the whole
+    class is unreachable until a second rank exists, so nothing else exercises it.
+    """
+
+    def test_straggler_emits_no_label(self, monkeypatch):
+        monkeypatch.setenv("RANK", "0")
+        inj = build("collective", 8000)
+        assert inj.label_scope == LabelScope.NONE
+
+    def test_waiting_ranks_label_their_compute(self, monkeypatch):
+        monkeypatch.setenv("RANK", "1")
+        inj = build("collective", 8000)
+        assert inj.label_scope == LabelScope.COMPUTE
+
+    def test_straggler_rank_is_configurable(self, monkeypatch):
+        monkeypatch.setenv("RANK", "3")
+        from whystall.inject.injectors import CollectiveStraggler
+
+        assert CollectiveStraggler(8000, straggler_rank=3).label_scope == LabelScope.NONE
+        assert CollectiveStraggler(8000, straggler_rank=0).label_scope == LabelScope.COMPUTE
+
+    def test_local_rank_is_honoured_when_rank_is_absent(self, monkeypatch):
+        monkeypatch.delenv("RANK", raising=False)
+        monkeypatch.setenv("LOCAL_RANK", "1")
+        assert build("collective", 8000).label_scope == LabelScope.COMPUTE
+
+    def test_describe_reports_the_rank_dependent_scope(self, monkeypatch):
+        """The manifest reads label_scope, so it must follow the rank too."""
+        monkeypatch.setenv("RANK", "0")
+        assert build("collective", 8000).describe()["label_scope"] == LabelScope.NONE
+        monkeypatch.setenv("RANK", "1")
+        assert build("collective", 8000).describe()["label_scope"] == LabelScope.COMPUTE

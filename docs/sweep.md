@@ -77,11 +77,58 @@ writes host details into every manifest automatically.
 | controls | 3 runs, no injection | the only thing that makes precision interpretable |
 | repeats | 1 initially | add repeats only where the curve is ragged |
 
-33 runs. At 40 profiled steps each, that is well under an hour of GPU time.
+33 runs in phase 1, plus 5 more in phase 2. At 40 profiled steps each, that is
+well under an hour of GPU time.
 
-**Two GPUs from here on.** Collective wait cannot be injected or validated on a
-single device, and it is the class that carries the tool beyond the storage
-vendors. One node, two GPUs, no RDMA needed.
+### Run it in two phases, and do not merge them
+
+Wrapping the model in DDP puts a gradient allreduce in **every** step. A
+dataloader or h2d run measured under `torchrun` is therefore not the run this
+plan specifies -- it carries a collective the single-process baseline never had,
+and comparing the two is comparing different workloads. So:
+
+```bash
+# Phase 1 -- the six single-process classes, no DDP, 33 runs.
+python examples/train_reference.py --sweep --out runs/
+
+# Phase 2 -- collective only, two ranks, reusing phase 1's controls. 5 runs x 2 ranks.
+torchrun --nproc_per_node=2 examples/train_reference.py     --sweep --injectors collective --no-controls --out runs/
+
+# Score both together.
+whystall validate runs/ --out validation.html
+```
+
+`--no-controls` on phase 2 is deliberate: controls exist to characterise the
+uninjected distribution, phase 1 already produced three, and a DDP control would
+not be comparable to them anyway.
+
+**Two GPUs for phase 2 only.** Collective wait cannot be injected or validated on
+a single device, and it is the class that carries the tool beyond the storage
+vendors. One node, two GPUs, no RDMA needed. Phase 1 runs on one.
+
+The script refuses the ways this goes wrong, **before it runs anything**:
+
+- `--injectors collective` without a second rank exits 2 and prints the torchrun
+  line, rather than discovering it 33 runs later;
+- an unknown injector name exits 2 and lists the valid ones;
+- non-collective classes under `torchrun` warn that DDP has changed the workload.
+
+All three fire ahead of the first run, so a mistyped phase costs nothing.
+
+Two consequences of the straggler design, both of which show up in the output:
+
+- **Each rank writes its own run**, suffixed `-rank0`, `-rank1`. Without the
+  suffix every rank races for one path and you keep one trace out of N, which
+  looks like a successful run until you try to score it.
+- **Only the waiting ranks carry ground truth.** The straggler causes the stall
+  but does not experience it -- its idle is its own spinning, which is host
+  compute -- so its manifest reports `ground_truth_class: null` and its trace
+  carries no inject label. That is correct. A straggler trace labelled
+  `collective` would score every honest verdict on that rank as a miss.
+
+The distributed path is rehearsable without any GPU at all: the backend falls
+back to gloo when CUDA is absent, so two CPU processes exercise DDP, the
+allreduce, the rank-suffixed naming and the asymmetric labelling.
 
 ## What each phase has to clear
 
